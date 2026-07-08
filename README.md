@@ -1,92 +1,208 @@
-# data-panel
+# 交付管线
 
+这是一个本地项目进展数据看板。外部人员默认以访客模式查询项目进展，内部人员进入管理员模式后可以录入和编辑项目数据。
 
+新版需求已整理为：[交付管线功能建设说明](./docs/交付管线功能建设说明.md)。
 
-## Getting started
+部署和飞书集成方案见：[交付管线部署与飞书集成方案](./docs/部署与飞书集成方案.md)。
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+## 运行
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/ee/gitlab-basics/add-file.html#add-a-file-using-the-command-line) or push an existing Git repository with the following command:
-
-```
-cd existing_repo
-git remote add origin https://gitlab.pjlab.org.cn/dps/data-panel.git
-git branch -M main
-git push -uf origin main
+```bash
+npm run build
+npm run start
 ```
 
-## Integrate with your tools
+打开：
 
-- [ ] [Set up project integrations](https://gitlab.pjlab.org.cn/dps/data-panel/-/settings/integrations)
+```text
+http://127.0.0.1:5173
+```
 
-## Collaborate with your team
+同一局域网内的项目成员可访问：
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Automatically merge when pipeline succeeds](https://docs.gitlab.com/ee/user/project/merge_requests/merge_when_pipeline_succeeds.html)
+```text
+http://10.1.233.119:5173
+```
 
-## Test and Deploy
+## Docker 部署
 
-Use the built-in continuous integration in GitLab.
+复制环境变量模板：
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/index.html)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing(SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+```bash
+cp .env.example .env
+```
 
-***
+至少修改 `.env` 里的管理员口令：
 
-# Editing this README
+```text
+ADMIN_PASSWORD=你的强口令
+```
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!).  Thank you to [makeareadme.com](https://www.makeareadme.com/) for this template.
+构建并启动：
 
-## Suggestions for a good README
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+```bash
+docker compose up -d --build
+```
 
-## Name
-Choose a self-explaining name for your project.
+查看日志：
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+```bash
+docker compose logs -f delivery-pipeline
+```
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+停止服务：
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+```bash
+docker compose down
+```
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+Docker Compose 会同时启动应用、PostgreSQL 和 Redis。PostgreSQL 保存台账主数据和台账日志，Redis 用于后续飞书通知、同步任务等异步事件队列；`./data:/app/data` 仍保留为初始化种子数据和降级备份目录。
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+健康检查：
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+```bash
+curl http://127.0.0.1:5173/healthz
+```
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+监控指标：
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+```bash
+curl http://127.0.0.1:5173/metrics
+```
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+## 查询与筛选
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+访客模式只显示一个全局查询入口，可按项目名称、任务代码、负责人、项目对接人、部门、状态等信息查询。输入关键词后才显示匹配项目，且只返回公开进展字段。
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+管理员模式会显示完整看板、全量事项列表和筛选区。筛选字段限制为：
 
-## License
-For open source projects, say how it is licensed.
+- 获取状态
+- 隶属部门
+- 部门负责人
+- 项目对接人
+- 解决方案负责人
+- 获取渠道
+- 需求提出时间
+- 期望交付日期
+- Sprint
+- 承接方
+- 承接方责任人
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+完成度按「获取状态」统计：已完成/已有类状态数量 ÷ 当前视图总事项数量。右侧状态分布同样来自「获取状态」字段。
+
+## 管理员模式
+
+本地开发默认开启模拟飞书登录：
+
+- 需求方登录：选择或输入模拟需求方姓名，后端写入 session cookie，刷新页面后仍能看到自己的需求。
+- 需求方注册：创建一个本地模拟需求方身份，并可提交新需求。
+- 管理员登录：当前仍保留口令作为开发兜底，登录成功后同样写入 session cookie。
+
+点击右上角「管理员登录」进入管理员登录弹窗。
+
+默认管理员口令：
+
+```text
+admin123
+```
+
+也可以启动服务时用环境变量覆盖：
+
+```bash
+ADMIN_PASSWORD=你的口令 npm run start
+```
+
+进入管理员模式后：
+
+- 点击「导入数据」打开飞书表格字段对应的录入弹窗。
+- 获取状态、隶属部门、负责人、获取渠道、Sprint、承接方等字段会提供已有值候选项，也可以直接输入新值。
+- 点击表格行右侧「编辑」修改项目。
+- 在表格中可直接快速修改「获取状态」。
+
+## 实现技术栈
+
+- 前端：React + TypeScript + Vite。React 页面承载需求方入口、管理员台账、台账日志等交互。
+- 后端：NestJS + TypeScript。API 已拆为 Controller、Service、Store 层，便于继续接入鉴权、队列和外部系统。
+- 数据存储：PostgreSQL 为主存储，保存台账记录和变更日志；无 `DATABASE_URL` 时自动降级到本地 JSON。
+- 异步能力：Redis 用于事件队列，当前记录需求提交、关注人变更、导入和字段更新事件，后续可接飞书通知和同步任务。
+- 权限模式：本地通过 session cookie 识别当前用户；需求方只读取本人相关需求，管理员可读取完整 `/api/data` 并写入数据。旧的 `x-admin-token` 仍保留用于接口调试。
+- 部署方式：React 构建产物 + NestJS API 单镜像，配套 PostgreSQL、Redis 使用 Docker Compose 部署。
+- 生产化预留：真实飞书 OAuth login/callback 入口、飞书通讯录、飞书 Base 同步、Prometheus 指标、Nginx HTTPS 和横向扩容。
+
+## 飞书集成方向
+
+后续正式部署建议接入飞书：
+
+- 登录：当前已实现本地 mock 登录、session cookie 和 `/api/auth/me`；正式环境用飞书 OAuth 替代 mock 登录和管理员口令。
+- 人员选择：`需求负责人`、`需求人`、`关注人`、`解决方案负责人` 等字段使用飞书通讯录搜索选择，保存 `open_id`，页面展示姓名。
+- 数据：需求提交写入飞书提需求表，交付台账读取和更新飞书总表。
+- 通知：新需求、状态变更、关注人变更通过飞书机器人或消息能力通知相关人员。
+- 监控：用 `/healthz` 做服务健康检查，用 `/metrics` 接 Prometheus 或其他监控系统。
+
+本地认证接口：
+
+```text
+GET  /api/auth/me
+POST /api/auth/mock-login
+POST /api/auth/logout
+GET  /api/auth/lark/login
+GET  /api/auth/lark/callback
+```
+
+正式接飞书 OAuth 前，需要设置：
+
+```env
+AUTH_MOCK_ENABLED=false
+LARK_APP_ID=飞书应用 App ID
+LARK_APP_SECRET=飞书应用 App Secret
+LARK_REDIRECT_URI=https://你的域名/api/auth/lark/callback
+```
+
+## 接口写入数据
+
+写接口需要管理员 token。先登录：
+
+```bash
+curl -X POST http://127.0.0.1:5173/api/admin/login \
+  -H "content-type: application/json" \
+  --data '{"password":"admin123"}'
+```
+
+新增记录：
+
+```bash
+curl -X POST http://127.0.0.1:5173/api/records \
+  -H "content-type: application/json" \
+  -H "x-admin-token: 上一步返回的token" \
+  --data '{"fields":{"项目名称":"示例项目","获取状态":"需求澄清中"}}'
+```
+
+访客公开查询：
+
+```bash
+curl "http://127.0.0.1:5173/api/search?q=CIRCL"
+```
+
+管理员读取完整数据：
+
+```bash
+curl http://127.0.0.1:5173/api/data \
+  -H "x-admin-token: 上一步返回的token"
+```
+
+## 同步飞书数据
+
+```bash
+npm run sync
+```
+
+同步脚本会读取：
+
+- Wiki token: `ZqC3whTTXiU2rUkLdRycTtmhnYE`
+- Table: `tbl7FrAYMpseNuPA`
+- View: `vewkBG8gpp`
+
+同步脚本会分页读取所有字段和记录，写入 `data/project-data.json`。
+
+当前本机 `lark-cli` 对该 Wiki 节点没有读权限。需要先确认当前飞书用户或当前飞书应用拥有该 Wiki/Base 的读取权限，然后再运行同步。没有飞书权限时，直接用网页或接口导入导出的 CSV/JSON。
