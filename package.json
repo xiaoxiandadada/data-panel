@@ -1,0 +1,37 @@
+{
+  "name": "data-panel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build && tsc -p tsconfig.server.json",
+    "start": "node dist/server/main.js",
+    "start:legacy": "node server.mjs",
+    "check": "tsc -p tsconfig.server.json --noEmit && vite build --mode check",
+    "sync": "node scripts/sync-feishu.mjs"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.1.28",
+    "@nestjs/core": "^11.1.28",
+    "@nestjs/platform-express": "^11.1.28",
+    "express": "^5.2.1",
+    "ioredis": "^5.11.1",
+    "pg": "^8.22.0",
+    "pino": "^10.3.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.1.1",
+    "@types/pg": "^8.20.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "typescript": "^6.0.3",
+    "vite": "^8.1.3"
+  }
+}

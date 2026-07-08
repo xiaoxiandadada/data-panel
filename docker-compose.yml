@@ -1,0 +1,66 @@
+services:
+  delivery-pipeline:
+    build:
+      context: .
+    image: delivery-pipeline:local
+    container_name: delivery-pipeline
+    restart: unless-stopped
+    ports:
+      - "${PORT:-5173}:5173"
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 5173
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change-me-before-deploy}
+      AUTH_SECRET: ${AUTH_SECRET:-change-me-before-deploy}
+      AUTH_MOCK_ENABLED: ${AUTH_MOCK_ENABLED:-true}
+      DATABASE_URL: ${DATABASE_URL:-postgres://delivery:delivery@postgres:5432/delivery_pipeline}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      LARK_APP_ID: ${LARK_APP_ID:-}
+      LARK_APP_SECRET: ${LARK_APP_SECRET:-}
+      LARK_REDIRECT_URI: ${LARK_REDIRECT_URI:-}
+      LARK_BASE_TOKEN: ${LARK_BASE_TOKEN:-}
+      LARK_LEDGER_TABLE_ID: ${LARK_LEDGER_TABLE_ID:-tbl7FrAYMpseNuPA}
+      LARK_REQUEST_TABLE_ID: ${LARK_REQUEST_TABLE_ID:-tblrdV8pbi1Ny9mJ}
+      LARK_WEBHOOK_URL: ${LARK_WEBHOOK_URL:-}
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5173/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: delivery-pipeline-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: delivery_pipeline
+      POSTGRES_USER: delivery
+      POSTGRES_PASSWORD: delivery
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U delivery -d delivery_pipeline"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: delivery-pipeline-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+
+volumes:
+  postgres-data:
+  redis-data:
