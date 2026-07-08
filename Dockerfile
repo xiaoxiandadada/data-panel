@@ -3,7 +3,7 @@ FROM gitlab.pjlab.org.cn:5050/dps-registry/hub/node:22-alpine AS deps
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --registry=https://npm.shlab.tech
 
 FROM deps AS build
 
@@ -21,7 +21,7 @@ ENV NODE_ENV=production \
     PORT=5173
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev --registry=https://npm.shlab.tech
 
 COPY --from=build /app/dist ./dist
 COPY scripts ./scripts
