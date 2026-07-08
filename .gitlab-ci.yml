@@ -20,7 +20,7 @@ test:
     name: docker.shlab.tech/public/node:22-alpine
     entrypoint: [""]
   script:
-    - npm ci
+    - npm ci --registry=https://npm.shlab.tech
     - npm run check
 
 build:
