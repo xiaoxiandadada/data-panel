@@ -1,44 +1,32 @@
 stages:
-  - dry-run
+  - test
   - build
+  - confirm
   - deploy
 
+variables:
+  CI_REGISTRY: docker.shlab.tech
+  CI_REGISTRY_USER: cicd@1397355716557288
+  CI_REGISTRY_PASSWORD: QUE5MTAwQzEtQkEyMi00Q0QxLTg0MDYt
+
 before_script:
-  - export IMAGE_TAG=${CI_COMMIT_TAG:-${CI_COMMIT_BRANCH}.${CI_PIPELINE_IID:-c.${CI_COMMIT_SHA:0:8}}}
-  - if [ "$CI_COMMIT_REF_NAME" == "main" ]; then export APP_ENV="prod"; elif [ "$CI_COMMIT_REF_NAME" == "dev" ]; then export APP_ENV="dev"; fi
+  - export IMAGE_REPOSITORY=${CI_PROJECT_PATH}
+  - export IMAGE_TAG=${CI_COMMIT_BRANCH}.${CI_PIPELINE_IID:-c.${CI_COMMIT_SHA:0:8}}
+  - export IMAGE_NAME=${CI_REGISTRY}/${IMAGE_REPOSITORY}:${IMAGE_TAG}
 
-pre-develop:
-  stage: dry-run
-  only:
-    - dev
-  image: gitlab.pjlab.org.cn:5050/dps-registry/hub/node:22-alpine
+test:
+  stage: test
+  image:
+    name: docker.shlab.tech/public/node:22-alpine
+    entrypoint: [""]
   script:
-    - echo "next-version=$CI_COMMIT_BRANCH.$CI_PIPELINE_IID" >> version.txt
-  artifacts:
-    paths:
-      - version.txt
+    - npm ci
+    - npm run check
 
-release-dry-run:
-  stage: dry-run
-  image: gitlab.pjlab.org.cn:5050/dps-registry/hub/node:22-alpine
-  rules:
-    - if: $CI_COMMIT_BRANCH == "main"
-  script:
-    - OUTPUT="$(bash -c "npx --registry=https://npm.shlab.tech --yes -p semantic-release@24.2.8 -p @semantic-release/gitlab -p @shlab/commit-analyzer -p @semantic-release/release-notes-generator@14 -p @semantic-release/git@10 -p conventional-changelog-conventionalcommits@8 semantic-release --dry-run 2>&1 | tee /dev/stderr")"
-    - NEW_RELEASE_VERSION=$(echo "$OUTPUT" | grep -ioP 'The next release version is \K(\d+\.\d+\.\d+(-\w*(-\w*)*\.\d+)?)')
-    - echo "$NEW_RELEASE_VERSION"
-    - echo "next-version=$NEW_RELEASE_VERSION" >> version.txt
-  artifacts:
-    paths:
-      - version.txt
-
-build-image:
+build:
   stage: build
   rules:
     - if: "$CI_COMMIT_REF_NAME =~ /^(main|dev)$/"
-  dependencies:
-    - release-dry-run
-    - pre-develop
   image:
     name: docker.shlab.tech/public/kaniko-executor:debug
     entrypoint: [""]
@@ -47,11 +35,9 @@ build-image:
       - /cache
   retry: 2
   script:
-    - export IMAGE_TAG=$(grep next-version version.txt | cut -d'=' -f2)
+    - export
     - mkdir -p /kaniko/.docker
-    - echo "{\"auths\":{\"${CI_REGISTRY}\":{\"auth\":\"$(printf "%s:%s" "${CI_REGISTRY_USER}" "${GL_TOKEN}" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
-    - export IMAGE_NAME=${CI_REGISTRY}/${PUBLIC_REGISTRY_NAMESPACE}/${CI_PROJECT_NAME}:${IMAGE_TAG}
-    - echo $IMAGE_NAME
+    - echo "{\"auths\":{\"${CI_REGISTRY}\":{\"auth\":\"$(printf "%s:%s" "${CI_REGISTRY_USER}" "${CI_REGISTRY_PASSWORD}" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
     - >-
       /kaniko/executor
       --context "${CI_PROJECT_DIR}"
@@ -60,69 +46,30 @@ build-image:
       --cache=true
       --force
 
-deploy-dev:
-  stage: deploy
-  image: node:20-alpine
-  needs:
-    - pre-develop
-    - build-image
-  dependencies:
-    - pre-develop
-    - build-image
+confirm_production_deployment:
+  stage: confirm
   rules:
-    - if: $CI_COMMIT_BRANCH == "dev"
-  environment:
-    name: dev
-  variables:
-    APP_ENV: dev
-  script:
-    - export IMAGE_TAG=$(grep next-version version.txt | cut -d'=' -f2)
-    - echo $IMAGE_TAG
-    - export GIT_TAG="/${CI_PROJECT_NAME}@v${IMAGE_TAG}"
-    - DEBUG=* npm_config_registry=https://npm.shlab.tech npx gitops-deploy -c ./deployrc.${APP_ENV}.json
-
-deploy-prod:
-  stage: deploy
-  image: node:20-alpine
-  needs:
-    - release-dry-run
-    - build-image
-  dependencies:
-    - release-dry-run
-    - build-image
-  rules:
-    - if: $CI_COMMIT_BRANCH == "main"
-  environment:
-    name: prod
-  variables:
-    APP_ENV: prod
-  script:
-    - export IMAGE_TAG=$(grep next-version version.txt | cut -d'=' -f2)
-    - echo $IMAGE_TAG
-    - export GIT_TAG="/${CI_PROJECT_NAME}@v${IMAGE_TAG}"
-    - DEBUG=* npm_config_registry=https://npm.shlab.tech npx gitops-deploy -c ./deployrc.${APP_ENV}.json
-
-release:
-  stage: .post
-  image: gitlab.pjlab.org.cn:5050/dps-registry/hub/node:22-alpine
-  rules:
-    - if: $CI_COMMIT_BRANCH == "main"
+    - if: "$CI_COMMIT_REF_NAME == 'main'"
       when: manual
-  dependencies:
-    - release-dry-run
   script:
-    - export NEXT_VERSION=$(grep next-version version.txt | cut -d'=' -f2)
-    - sed -i "s/\"version\":\ \".*\"/\"version\":\ \"${NEXT_VERSION}\"/" ./package.json
-    - npx --registry=https://npm.shlab.tech --yes -p semantic-release@24.2.8 -p @semantic-release/gitlab -p @shlab/commit-analyzer -p @semantic-release/release-notes-generator -p @semantic-release/git -p conventional-changelog-conventionalcommits semantic-release
+    - echo "确认部署到生产环境"
 
-dev-notification:
-  stage: .pre
-  image: curlimages/curl
-  allow_failure: true
+deploy:
+  stage: deploy
+  image: node:20-alpine
+  needs:
+    - job: build
+    - job: confirm_production_deployment
+      optional: true
+  variables:
+    GITOPS_TOKEN: ${GITOPS_TOKEN}
   rules:
-    - if: $CI_COMMIT_BRANCH == "dev"
+    - if: "$CI_COMMIT_REF_NAME == 'main'"
+      when: on_success
+    - if: "$CI_COMMIT_REF_NAME == 'dev'"
       when: on_success
   script:
-    - >-
-      echo "{\"msg_type\":\"interactive\",\"card\":{\"elements\":[{\"tag\":\"div\",\"text\":{\"tag\":\"lark_md\",\"content\":\"${CI_PROJECT_NAME} ${CI_COMMIT_MESSAGE} 👉🏻 [${CI_COMMIT_SHORT_SHA}](https://pjlab.gitlab.org.cn/${CI_PROJECT_PATH}/-/commit/${CI_COMMIT_SHA})\"}}]}}" | \
-        curl -X POST -H 'Content-Type: application/json; charset=utf-8' -d @- ${BOT_WEBHOOK}
+    - echo $IMAGE_NAME
+    - export GIT_TAG="${CI_PROJECT_NAME}@v${IMAGE_TAG}"
+    - if [ "$CI_COMMIT_REF_NAME" = "main" ]; then export APP_ENV=prod; else export APP_ENV=dev; fi
+    - DEBUG=* npm_config_registry="https://npm.shlab.tech" npx gitops-deploy -c ./deployrc.${APP_ENV}.json
