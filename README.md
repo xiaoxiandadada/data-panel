@@ -2,8 +2,6 @@
 
 这是一个本地项目进展数据看板。外部人员默认以访客模式查询项目进展，内部人员进入管理员模式后可以录入和编辑项目数据。
 
-新版需求已整理为：[交付管线功能建设说明](./docs/交付管线功能建设说明.md)。
-
 部署和飞书集成方案见：[交付管线部署与飞书集成方案](./docs/部署与飞书集成方案.md)。
 
 ## 运行
@@ -57,7 +55,7 @@ docker compose logs -f delivery-pipeline
 docker compose down
 ```
 
-Docker Compose 会同时启动应用、PostgreSQL 和 Redis。PostgreSQL 保存台账主数据和台账日志，Redis 用于后续飞书通知、同步任务等异步事件队列；`./data:/app/data` 仍保留为初始化种子数据和降级备份目录。
+Docker Compose 会同时启动应用、MongoDB 和 Redis。MongoDB 保存台账主数据、台账日志和登录用户，Redis 用于后续飞书通知、同步任务等异步事件队列；`./data:/app/data` 仍保留为初始化种子数据和降级备份目录。
 
 健康检查：
 
@@ -124,10 +122,10 @@ ADMIN_PASSWORD=你的口令 npm run start
 
 - 前端：React + TypeScript + Vite。React 页面承载需求方入口、管理员台账、台账日志等交互。
 - 后端：NestJS + TypeScript。API 已拆为 Controller、Service、Store 层，便于继续接入鉴权、队列和外部系统。
-- 数据存储：PostgreSQL 为主存储，保存台账记录和变更日志；无 `DATABASE_URL` 时自动降级到本地 JSON。
+- 数据存储：MongoDB 为主存储，保存台账记录、变更日志和登录用户；无 `MONGODB_URI` 时自动降级到本地 JSON。
 - 异步能力：Redis 用于事件队列，当前记录需求提交、关注人变更、导入和字段更新事件，后续可接飞书通知和同步任务。
 - 权限模式：本地通过 session cookie 识别当前用户；需求方只读取本人相关需求，管理员可读取完整 `/api/data` 并写入数据。飞书 OAuth 用户会按 open_id/email 映射管理员角色，旧的 `x-admin-token` 仍保留用于接口调试。
-- 部署方式：React 构建产物 + NestJS API 单镜像，配套 PostgreSQL、Redis 使用 Docker Compose 部署。
+- 部署方式：React 构建产物 + NestJS API 单镜像，配套 MongoDB、Redis 使用 Docker Compose 部署。
 - 生产化预留：飞书通讯录人员选择、飞书 Base 双向同步、Prometheus 指标、Nginx HTTPS 和横向扩容。
 
 ## 飞书集成方向
@@ -163,7 +161,7 @@ LARK_DELIVERY_ADMIN_OPEN_IDS=交付管理员open_id
 LARK_PURCHASE_ADMIN_OPEN_IDS=采购管理员open_id
 ```
 
-给部署人交接时，可以直接参考 [docs/dev-env.example](/Users/fairy/Documents/interview/ailab/data-panel/docs/dev-env.example) 和 [docs/feishu-oauth-setup.md](/Users/fairy/Documents/interview/ailab/data-panel/docs/feishu-oauth-setup.md)。这些文件只放变量模板和操作说明，不放真实密钥；生产环境的 `LARK_APP_SECRET` 应由飞书应用所有者通过安全渠道交给部署人。
+给部署人交接时，可以直接参考 [docs/部署与飞书集成方案.md](/Users/fairy/Documents/interview/ailab/data-panel/docs/部署与飞书集成方案.md)。文档只放变量模板和操作说明，不放真实密钥；生产环境的 `LARK_APP_SECRET` 应由飞书应用所有者通过安全渠道交给部署人。
 
 也可以用邮箱映射管理员角色：
 

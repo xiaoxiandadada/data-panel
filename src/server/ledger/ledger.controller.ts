@@ -36,7 +36,7 @@ export class LedgerController {
     const dataset = await this.store.readDataset();
     return {
       ...datasetStats(dataset),
-      postgres: this.store.isPostgresReady() ? "ready" : "fallback-json",
+      mongodb: this.store.isMongoReady() ? "ready" : "fallback-json",
       redis: this.queue.isReady() ? "ready" : "disabled"
     };
   }
