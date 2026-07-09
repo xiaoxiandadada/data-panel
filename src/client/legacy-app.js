@@ -234,6 +234,10 @@ let state = {
 
 const el = (id) => document.getElementById(id);
 
+function isOAuthMode() {
+  return state.larkOAuthEnabled && !state.mockUsers.length;
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -989,6 +993,33 @@ function updateModeUI() {
   document.body.classList.toggle("admin-mode", state.adminMode);
   el("modeButton").textContent = state.authRole ? "退出登录" : "管理员登录";
   el("modeButton").classList.toggle("primary", state.adminMode);
+  updateLoginGate();
+}
+
+function updateLoginGate() {
+  const oauthMode = isOAuthMode();
+  const loginGate = el("loginGate");
+  const copy = loginGate.querySelector(".login-copy > p:not(.eyebrow)");
+  const requesterLoginLabel = el("requesterLoginButton").querySelector("span");
+  const requesterLoginHint = el("requesterLoginButton").querySelector("small");
+  const requesterRegisterButton = el("requesterRegisterButton");
+  const adminLoginLabel = el("adminLoginButton").querySelector("span");
+  const adminLoginHint = el("adminLoginButton").querySelector("small");
+
+  if (copy) {
+    copy.textContent = oauthMode
+      ? "使用飞书账号登录后，系统会按企业身份识别需求方或管理员权限。"
+      : "需求方可注册或登录后查看自己的需求进展并提交新需求，管理员维护台账和负责人视图。";
+  }
+  if (requesterLoginLabel) requesterLoginLabel.textContent = oauthMode ? "飞书登录" : "需求方登录";
+  if (requesterLoginHint) requesterLoginHint.textContent = oauthMode ? "需求方与管理员统一认证" : "查看我的需求进展";
+  requesterRegisterButton.classList.toggle("hidden", oauthMode);
+  if (adminLoginLabel) adminLoginLabel.textContent = oauthMode ? "管理员登录" : "管理员登录";
+  if (adminLoginHint) adminLoginHint.textContent = oauthMode ? "按飞书权限进入后台" : "维护台账与负责人视图";
+
+  if (oauthMode && el("requesterAuthDialog").open) {
+    el("requesterAuthDialog").close();
+  }
 }
 
 function applyUser(user) {
@@ -1035,7 +1066,7 @@ async function logout() {
 }
 
 function openRequesterAuthDialog(mode) {
-  if (state.larkOAuthEnabled && !state.mockUsers.length) {
+  if (isOAuthMode()) {
     window.location.href = `/api/auth/lark/login?next=${encodeURIComponent("/")}`;
     return;
   }
@@ -1059,7 +1090,7 @@ function closeRequesterAuthDialog() {
 }
 
 function openAdminLogin() {
-  if (state.larkOAuthEnabled && !state.mockUsers.length) {
+  if (isOAuthMode()) {
     window.location.href = `/api/auth/lark/login?next=${encodeURIComponent("/")}`;
     return;
   }
