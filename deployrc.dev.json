@@ -1,0 +1,10 @@
+{
+  "extends": "./deployrc.json",
+  "notification_urls": [],
+  "deploy_targets": [
+    {
+      "yaml_path": "ack/@data-panel/@dev/+data-panel-svc/@values.yaml",
+      "image_name": "docker.shlab.tech/dps/data-panel"
+    }
+  ]
+}

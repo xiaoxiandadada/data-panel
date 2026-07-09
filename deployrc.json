@@ -1,0 +1,11 @@
+{
+  "gitops_id": 37,
+  "gitlab_api": "https://gitlab.pjlab.org.cn/api/v4",
+  "gitops_api_gitlab_url": "https://gitlab.shlab.tech/api/v4",
+  "gitops_branch": "main",
+  "release_branch": "main",
+  "send_deploy_notification": false,
+  "send_release_notification": false,
+  "deploy_timeout": 120,
+  "merge_to_develop": false
+}
