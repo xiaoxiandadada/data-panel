@@ -148,6 +148,7 @@ POST /api/auth/mock-login
 POST /api/auth/logout
 GET  /api/auth/lark/login
 GET  /api/auth/lark/callback
+GET  /api/lark/users/search?q=<keyword>
 ```
 
 正式接飞书 OAuth 前，需要设置：

@@ -66,6 +66,25 @@ export class LedgerController {
     return { ok: true, requesters: uniqueRequesterNames(dataset) };
   }
 
+  @Get("api/lark/users/search")
+  async searchLarkUsers(@Req() request: Request, @Query("q") q = "", @Query("limit") limit = "10") {
+    if (!this.currentUser(request)) {
+      throw new HttpException({ ok: false, message: "请先通过飞书登录" }, HttpStatus.UNAUTHORIZED);
+    }
+    if (!this.larkOAuth.isConfigured()) {
+      throw new HttpException({ ok: false, message: "飞书应用尚未配置，无法搜索企业通讯录" }, HttpStatus.NOT_IMPLEMENTED);
+    }
+    const safeLimit = Math.min(Math.max(Number(limit || 10), 1), 20);
+    try {
+      return { ok: true, users: await this.larkOAuth.searchUsers(q, safeLimit) };
+    } catch (error) {
+      throw new HttpException({
+        ok: false,
+        message: error instanceof Error ? error.message : "飞书通讯录搜索失败"
+      }, HttpStatus.BAD_GATEWAY);
+    }
+  }
+
   @Get("api/my-records")
   async myRecords(@Req() request: Request, @Query("name") name = "") {
     const dataset = await this.store.readDataset();

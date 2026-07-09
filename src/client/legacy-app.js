@@ -145,6 +145,9 @@ const SEARCH_FIELDS = [
   "2026需求编码"
 ];
 const LONG_FIELDS = new Set(["项目备注", "需求异常原因", "阻塞项", "验收备注", "交付异常原因", "入库地址", "数据平台地址"]);
+const PERSON_FIELDS = new Set(["需求负责人", "需求人", "关注人", "部门负责人", "项目对接人", "解决方案负责人", "承接方责任人"]);
+const MULTI_PERSON_FIELDS = new Set(["需求人", "关注人"]);
+const LINK_FIELDS = new Set(["需求文档", "入库地址", "数据平台地址", "交付路径"]);
 const STATUS_COLORS = {
   done: "#2f855a",
   active: "#2563eb",
@@ -229,7 +232,10 @@ let state = {
   editingRecordId: null,
   detailRecordId: null,
   detailLogs: [],
-  suggestionRequestId: 0
+  suggestionRequestId: 0,
+  personPickerTarget: null,
+  personSearchRequestId: 0,
+  personPickerTimer: 0
 };
 
 const el = (id) => document.getElementById(id);
@@ -245,6 +251,24 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value).replace(/`/g, "&#096;");
+}
+
+function isUrl(value) {
+  return /^https?:\/\/\S+$/i.test(String(value || "").trim());
+}
+
+function renderFieldValue(field, value) {
+  const text = stringifyCell(value);
+  if (!text) return "-";
+  if (LINK_FIELDS.has(field) && isUrl(text)) {
+    const label = field === "需求文档" ? "打开飞书文档" : "打开链接";
+    return `<a class="field-link" href="${escapeAttr(text)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`;
+  }
+  return escapeHtml(text);
 }
 
 function normalizeText(value) {
@@ -546,6 +570,123 @@ async function fetchJson(url, options = {}) {
   return result;
 }
 
+function ensurePersonPickerDialog() {
+  if (el("personPickerDialog")) return;
+  const style = document.createElement("style");
+  style.textContent = `
+    .field-link{color:#116b83;font-weight:700;text-decoration:none}.field-link:hover{text-decoration:underline}
+    .person-input-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;width:100%}
+    .person-input-row input{min-width:0}.person-picker-dialog{width:min(680px,calc(100vw - 32px));border:1px solid #d8e1e8;border-radius:14px;padding:0;box-shadow:0 24px 70px rgba(15,23,42,.22)}
+    .person-picker-body{padding:18px 22px 22px}.person-picker-search{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;margin-bottom:14px}
+    .person-picker-search input{height:46px;border:1px solid #d8e1e8;border-radius:10px;padding:0 14px;font:inherit}
+    .person-results{display:grid;gap:8px;max-height:360px;overflow:auto}.person-result{display:grid;grid-template-columns:1fr auto;gap:12px;text-align:left;border:1px solid #e3eaf0;background:#fff;border-radius:10px;padding:12px 14px;cursor:pointer}
+    .person-result:hover{border-color:#116b83;background:#f4fbfd}.person-result strong{display:block;color:#111827}.person-result span{color:#667085;font-size:13px}.person-result small{color:#116b83;font-weight:700}.person-picker-empty{border:1px dashed #d8e1e8;border-radius:10px;padding:18px;color:#667085;text-align:center}
+  `;
+  document.head.appendChild(style);
+  const dialog = document.createElement("dialog");
+  dialog.id = "personPickerDialog";
+  dialog.className = "person-picker-dialog";
+  dialog.innerHTML = `
+    <div class="dialog-head">
+      <div>
+        <h2>选择飞书人员</h2>
+        <p>从企业通讯录搜索后写入当前字段</p>
+      </div>
+      <button id="closePersonPicker" class="icon-button" type="button" title="关闭">×</button>
+    </div>
+    <div class="person-picker-body">
+      <div class="person-picker-search">
+        <input id="personPickerSearch" type="search" autocomplete="off" placeholder="输入姓名、邮箱或账号搜索" />
+        <button id="personPickerSearchButton" class="button primary" type="button">搜索</button>
+      </div>
+      <div id="personPickerResults" class="person-results">
+        <div class="person-picker-empty">输入关键词搜索飞书人员</div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(dialog);
+  el("closePersonPicker").addEventListener("click", closePersonPicker);
+  el("personPickerSearchButton").addEventListener("click", () => searchPersonPicker(el("personPickerSearch").value));
+  el("personPickerSearch").addEventListener("input", (event) => {
+    window.clearTimeout(state.personPickerTimer);
+    state.personPickerTimer = window.setTimeout(() => searchPersonPicker(event.target.value), 260);
+  });
+  el("personPickerSearch").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      searchPersonPicker(event.target.value);
+    }
+  });
+  el("personPickerResults").addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-person-name]");
+    if (!button || !state.personPickerTarget?.input) return;
+    writePickedPerson(state.personPickerTarget.input, button.dataset.personName, Boolean(state.personPickerTarget.multiple));
+    if (!state.personPickerTarget.multiple) closePersonPicker();
+  });
+}
+
+function openPersonPicker(input, multiple = false) {
+  if (!input) return;
+  ensurePersonPickerDialog();
+  state.personPickerTarget = { input, multiple };
+  const query = String(input.value || "").split(/[、,，]/).pop().trim();
+  el("personPickerSearch").value = query;
+  el("personPickerResults").innerHTML = `<div class="person-picker-empty">输入关键词搜索飞书人员</div>`;
+  el("personPickerDialog").showModal();
+  el("personPickerSearch").focus();
+  if (query) searchPersonPicker(query);
+}
+
+function closePersonPicker() {
+  el("personPickerDialog")?.close();
+  state.personPickerTarget = null;
+}
+
+function writePickedPerson(input, name, multiple) {
+  const picked = String(name || "").trim();
+  if (!picked) return;
+  if (!multiple) {
+    input.value = picked;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    return;
+  }
+  const names = String(input.value || "")
+    .split(/[、,，]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (!names.includes(picked)) names.push(picked);
+  input.value = names.join("、");
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+async function searchPersonPicker(query) {
+  const keyword = String(query || "").trim();
+  const container = el("personPickerResults");
+  if (!keyword) {
+    container.innerHTML = `<div class="person-picker-empty">输入关键词搜索飞书人员</div>`;
+    return;
+  }
+  const requestId = ++state.personSearchRequestId;
+  container.innerHTML = `<div class="person-picker-empty">正在搜索...</div>`;
+  try {
+    const result = await fetchJson(`/api/lark/users/search?q=${encodeURIComponent(keyword)}&limit=12`);
+    if (requestId !== state.personSearchRequestId) return;
+    const users = result.users || [];
+    container.innerHTML = users.length ? users.map((user) => `
+      <button class="person-result" type="button" data-person-name="${escapeAttr(user.name)}">
+        <span>
+          <strong>${escapeHtml(user.name)}</strong>
+          <span>${escapeHtml([user.department, user.email].filter(Boolean).join(" · ") || user.openId || "")}</span>
+        </span>
+        <small>选择</small>
+      </button>
+    `).join("") : `<div class="person-picker-empty">没有匹配的飞书人员</div>`;
+  } catch (error) {
+    if (requestId !== state.personSearchRequestId) return;
+    container.innerHTML = `<div class="person-picker-empty">${escapeHtml(error.message || "飞书人员搜索失败")}</div>`;
+  }
+}
+
 async function loadPublicSearch(query, limit = 100) {
   const data = await fetchJson(`${SEARCH_URL}?q=${encodeURIComponent(query)}&limit=${limit}`);
   return data.records || [];
@@ -665,7 +806,7 @@ function renderRow(record) {
       return `<td class="status-cell">${renderStatusSelect(record, value)}</td>`;
     }
     const className = column === "项目名称" ? "project-name-cell" : "";
-    return `<td class="${className}" title="${escapeHtml(value)}">${escapeHtml(value || "-")}</td>`;
+    return `<td class="${className}" title="${escapeHtml(value)}">${renderFieldValue(column, value)}</td>`;
   }).join("");
 
   return `
@@ -735,7 +876,10 @@ function renderFollowerEditor(record) {
     <div class="follower-editor">
       <label>
         <span>关注人</span>
-        <input data-follower-input="${escapeHtml(record.record_id)}" value="${escapeHtml(followers)}" placeholder="输入多人，用顿号分隔" />
+        <div class="person-input-row">
+          <input data-follower-input="${escapeHtml(record.record_id)}" data-person-input value="${escapeHtml(followers)}" placeholder="输入多人，用顿号分隔" />
+          <button class="button mini" type="button" data-pick-person data-person-multiple="true">飞书选择</button>
+        </div>
       </label>
       <button class="button mini" type="button" data-save-followers="${escapeHtml(record.record_id)}">保存关注人</button>
     </div>
@@ -765,7 +909,7 @@ function renderRequesterView() {
       ${renderMiniProgress(record)}
       <div class="requester-card-grid">
         ${REQUESTER_COLUMNS.filter((column) => column !== "项目名称" && column !== "获取状态").map((column) => `
-          <span><b>${escapeHtml(column)}</b>${escapeHtml(cell(record, column) || "-")}</span>
+          <span><b>${escapeHtml(column)}</b>${renderFieldValue(column, cell(record, column))}</span>
         `).join("")}
       </div>
       ${renderFollowerEditor(record)}
@@ -803,7 +947,7 @@ function renderRowWithColumns(record, columns, editable = false) {
       return `<td class="status-cell">${renderStatusSelect(record, value)}</td>`;
     }
     const className = column === "项目名称" ? "project-name-cell" : "";
-    return `<td class="${className}" title="${escapeHtml(value)}">${escapeHtml(value || "-")}</td>`;
+    return `<td class="${className}" title="${escapeHtml(value)}">${renderFieldValue(column, value)}</td>`;
   }).join("");
   return `
     <tr data-record-id="${escapeHtml(record.record_id)}">
@@ -1137,6 +1281,14 @@ function renderDemandControl(field) {
     `;
   }
   const type = field.type === "date" ? "date" : field.type === "number" ? "number" : field.type === "url" ? "url" : "text";
+  if (PERSON_FIELDS.has(field.name)) {
+    return `
+      <div class="person-input-row">
+        <input name="${escapeHtml(field.name)}" type="${type}" value="${escapeHtml(defaultValue)}" ${required} ${placeholder} data-person-input />
+        <button class="button mini" type="button" data-pick-person data-person-multiple="${MULTI_PERSON_FIELDS.has(field.name) ? "true" : "false"}">飞书选择</button>
+      </div>
+    `;
+  }
   return `<input name="${escapeHtml(field.name)}" type="${type}" value="${escapeHtml(defaultValue)}" ${required} ${placeholder} />`;
 }
 
@@ -1160,6 +1312,9 @@ function closeRequestDialog() {
 }
 
 function renderRecordControl(name, value, index) {
+  const personButton = PERSON_FIELDS.has(name)
+    ? `<button class="button mini" type="button" data-pick-person data-person-multiple="${MULTI_PERSON_FIELDS.has(name) ? "true" : "false"}">飞书选择</button>`
+    : "";
   if (LONG_FIELDS.has(name)) {
     return `<textarea name="${escapeHtml(name)}">${escapeHtml(value)}</textarea>`;
   }
@@ -1168,10 +1323,22 @@ function renderRecordControl(name, value, index) {
     const options = formOptions(name);
     const listId = `form-options-${index}`;
     return `
-      <input name="${escapeHtml(name)}" value="${escapeHtml(value)}" list="${listId}" placeholder="选择已有选项或直接输入" />
+      <div class="${PERSON_FIELDS.has(name) ? "person-input-row" : ""}">
+        <input name="${escapeHtml(name)}" value="${escapeHtml(value)}" list="${listId}" placeholder="选择已有选项或直接输入" ${PERSON_FIELDS.has(name) ? "data-person-input" : ""} />
+        ${personButton}
+      </div>
       <datalist id="${listId}">
         ${options.map((option) => `<option value="${escapeHtml(option)}"></option>`).join("")}
       </datalist>
+    `;
+  }
+
+  if (PERSON_FIELDS.has(name)) {
+    return `
+      <div class="person-input-row">
+        <input name="${escapeHtml(name)}" value="${escapeHtml(value)}" data-person-input />
+        ${personButton}
+      </div>
     `;
   }
 
@@ -1332,6 +1499,13 @@ el("requesterRegisterButton").addEventListener("click", () => openRequesterAuthD
 el("adminLoginButton").addEventListener("click", openAdminLogin);
 el("requestSubmitButton").addEventListener("click", () => {
   openRequestDialog();
+});
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-pick-person]");
+  if (!button) return;
+  const scope = button.closest(".person-input-row") || button.closest(".follower-editor") || button.closest("label");
+  const input = scope?.querySelector("input[data-person-input], input[data-follower-input]");
+  openPersonPicker(input, button.dataset.personMultiple === "true");
 });
 el("requesterCards").addEventListener("click", async (event) => {
   const saveId = event.target.closest("button[data-save-followers]")?.dataset.saveFollowers;

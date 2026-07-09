@@ -37,6 +37,22 @@ interface LarkUserInfoResponse {
   };
 }
 
+interface LarkTenantTokenResponse {
+  code?: number;
+  msg?: string;
+  message?: string;
+  tenant_access_token?: string;
+  expire?: number;
+}
+
+export interface LarkContactUser {
+  openId: string;
+  name: string;
+  email?: string;
+  department?: string;
+  avatar?: string;
+}
+
 type RoleConfig = {
   role: UserRole;
   openIds: Set<string>;
@@ -63,6 +79,7 @@ export class LarkOAuthService {
   private readonly redirectUri = cleanEnv(process.env.LARK_REDIRECT_URI);
   private readonly authHost = cleanEnv(process.env.LARK_AUTH_HOST) || "https://open.feishu.cn";
   private readonly apiHost = cleanEnv(process.env.LARK_API_HOST) || "https://open.feishu.cn";
+  private tenantTokenCache: { token: string; expiresAt: number } | null = null;
 
   isConfigured(): boolean {
     return Boolean(this.appId && this.appSecret && this.redirectUri);
@@ -90,6 +107,83 @@ export class LarkOAuthService {
     const accessToken = await this.exchangeCode(code);
     const profile = await this.fetchUserInfo(accessToken);
     return this.toAppUser(profile);
+  }
+
+  async searchUsers(query: string, limit = 10): Promise<LarkContactUser[]> {
+    const keyword = cleanEnv(query);
+    if (!keyword) return [];
+    const token = await this.tenantAccessToken();
+    const url = new URL("/open-apis/search/v1/user", this.apiHost);
+    url.searchParams.set("user_id_type", "open_id");
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json; charset=utf-8"
+      },
+      body: JSON.stringify({
+        query: keyword,
+        page_size: Math.min(Math.max(Number(limit || 10), 1), 20)
+      })
+    });
+    const payload = (await response.json().catch(() => null)) as Record<string, any> | null;
+    if (!response.ok || !payload || (typeof payload.code === "number" && payload.code !== 0)) {
+      throw new Error(`飞书通讯录搜索失败：${payload?.msg || payload?.message || response.statusText}`);
+    }
+    const users = this.extractSearchUsers(payload);
+    return users.slice(0, Math.min(Math.max(Number(limit || 10), 1), 20));
+  }
+
+  private async tenantAccessToken(): Promise<string> {
+    if (this.tenantTokenCache && this.tenantTokenCache.expiresAt > Date.now() + 60_000) {
+      return this.tenantTokenCache.token;
+    }
+    if (!this.appId || !this.appSecret) {
+      throw new Error("飞书应用尚未配置 LARK_APP_ID 或 LARK_APP_SECRET");
+    }
+    const response = await fetch(new URL("/open-apis/auth/v3/tenant_access_token/internal", this.apiHost), {
+      method: "POST",
+      headers: { "content-type": "application/json; charset=utf-8" },
+      body: JSON.stringify({
+        app_id: this.appId,
+        app_secret: this.appSecret
+      })
+    });
+    const payload = (await response.json().catch(() => null)) as LarkTenantTokenResponse | null;
+    if (!response.ok || !payload || payload.code !== 0 || !payload.tenant_access_token) {
+      throw new Error(`飞书 tenant_access_token 获取失败：${payload?.msg || payload?.message || response.statusText}`);
+    }
+    this.tenantTokenCache = {
+      token: payload.tenant_access_token,
+      expiresAt: Date.now() + Math.max(Number(payload.expire || 3600) - 120, 60) * 1000
+    };
+    return payload.tenant_access_token;
+  }
+
+  private extractSearchUsers(payload: Record<string, any>): LarkContactUser[] {
+    const candidates =
+      payload.data?.users ||
+      payload.data?.items ||
+      payload.data?.result?.users ||
+      payload.users ||
+      [];
+    if (!Array.isArray(candidates)) return [];
+    return candidates
+      .map((item) => {
+        const user = item.user || item;
+        const name = cleanEnv(user.name || user.cn_name || user.en_name || user.display_name || user.email);
+        const openId = cleanEnv(user.open_id || user.openId || user.user_id || user.userId || user.id);
+        if (!name || !openId) return null;
+        const departments = user.departments || user.department_ids || user.department_path || user.department;
+        return {
+          openId,
+          name,
+          email: cleanEnv(user.email) || undefined,
+          department: Array.isArray(departments) ? departments.map((item) => cleanEnv(item.name || item)).filter(Boolean).join(" / ") : cleanEnv(departments) || undefined,
+          avatar: cleanEnv(user.avatar_url || user.avatar_thumb || user.avatar?.avatar_72 || user.avatar?.avatar_origin) || undefined
+        };
+      })
+      .filter(Boolean) as LarkContactUser[];
   }
 
   private async exchangeCode(code: string): Promise<string> {

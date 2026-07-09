@@ -10,7 +10,7 @@ In Feishu Developer Console:
 
 1. Open the app detail page.
 2. Copy `App ID` to `LARK_APP_ID`.
-3. Copy `App Secret` to `LARK_APP_SECRET`.
+3. Open **凭证与基础信息 / Credentials & Basic Info**, click the App Secret reveal/copy control, and copy it to `LARK_APP_SECRET`.
 4. Add the redirect URL:
 
 ```text
@@ -48,7 +48,19 @@ LARK_PURCHASE_ADMIN_EMAILS=<purchase-admin-email-1>
 
 `LARK_APP_SECRET` must be provided by the Feishu app owner or a Feishu app administrator. It should be stored in the server environment, CI secret store, or Alibaba Cloud secret manager.
 
-## 3. Role mapping
+## 3. Feishu contacts picker
+
+The UI can search Feishu users for requester, follower, project owner and solution owner fields.
+
+Backend endpoint:
+
+```text
+GET /api/lark/users/search?q=<keyword>&limit=12
+```
+
+This endpoint uses the app's `tenant_access_token` and Feishu user search API. If the dev environment returns a permission error, enable the app permissions related to searching users / reading basic contact information in Feishu Developer Console, publish or apply the app change, then retry.
+
+## 4. Role mapping
 
 Prefer email mapping first:
 
@@ -64,7 +76,7 @@ LARK_DELIVERY_ADMIN_OPEN_IDS=
 LARK_PURCHASE_ADMIN_OPEN_IDS=
 ```
 
-## 4. Local verification
+## 5. Local verification
 
 After filling the secret:
 
@@ -82,3 +94,9 @@ http://127.0.0.1:5173
 ```
 
 Click login. After Feishu authorization, the app should return to the dashboard and `/api/auth/me` should show the current Feishu user.
+
+Verify the Feishu contacts picker after login:
+
+```bash
+curl "http://127.0.0.1:5173/api/lark/users/search?q=张&limit=5" --cookie "<browser-session-cookie>"
+```
