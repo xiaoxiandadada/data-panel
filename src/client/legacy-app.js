@@ -213,6 +213,7 @@ let state = {
   authRole: "",
   currentUser: null,
   mockUsers: [],
+  larkOAuthEnabled: false,
   requesterAuthMode: "login",
   query: "",
   draft: "",
@@ -536,8 +537,9 @@ async function fetchJson(url, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (state.adminToken) headers["x-admin-token"] = state.adminToken;
   const response = await fetch(url, { credentials: "same-origin", ...options, headers });
-  if (!response.ok) throw new Error("请求失败");
-  return response.json();
+  const result = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(result?.message || "请求失败");
+  return result;
 }
 
 async function loadPublicSearch(query, limit = 100) {
@@ -1007,6 +1009,7 @@ function applyUser(user) {
 async function loadSession() {
   const session = await fetchJson(`/api/auth/me?t=${Date.now()}`);
   state.mockUsers = session.mockUsers || [];
+  state.larkOAuthEnabled = Boolean(session.larkOAuthEnabled);
   if (session.authenticated) {
     applyUser(session.user);
   }
@@ -1032,6 +1035,10 @@ async function logout() {
 }
 
 function openRequesterAuthDialog(mode) {
+  if (state.larkOAuthEnabled && !state.mockUsers.length) {
+    window.location.href = `/api/auth/lark/login?next=${encodeURIComponent("/")}`;
+    return;
+  }
   state.requesterAuthMode = mode;
   const isRegister = mode === "register";
   el("requesterAuthTitle").textContent = isRegister ? "需求方注册" : "需求方登录";
@@ -1049,6 +1056,16 @@ function openRequesterAuthDialog(mode) {
 
 function closeRequesterAuthDialog() {
   el("requesterAuthDialog").close();
+}
+
+function openAdminLogin() {
+  if (state.larkOAuthEnabled && !state.mockUsers.length) {
+    window.location.href = `/api/auth/lark/login?next=${encodeURIComponent("/")}`;
+    return;
+  }
+  el("adminPassword").value = "";
+  el("adminError").classList.add("hidden");
+  el("adminDialog").showModal();
 }
 
 async function enterRequester(name) {
@@ -1281,11 +1298,7 @@ el("ownerTabs").addEventListener("click", (event) => {
 });
 el("requesterLoginButton").addEventListener("click", () => openRequesterAuthDialog("login"));
 el("requesterRegisterButton").addEventListener("click", () => openRequesterAuthDialog("register"));
-el("adminLoginButton").addEventListener("click", () => {
-  el("adminPassword").value = "";
-  el("adminError").classList.add("hidden");
-  el("adminDialog").showModal();
-});
+el("adminLoginButton").addEventListener("click", openAdminLogin);
 el("requestSubmitButton").addEventListener("click", () => {
   openRequestDialog();
 });
@@ -1308,9 +1321,7 @@ el("modeButton").addEventListener("click", async () => {
     });
     return;
   }
-  el("adminPassword").value = "";
-  el("adminError").classList.add("hidden");
-  el("adminDialog").showModal();
+  openAdminLogin();
 });
 el("projectSearchInput").addEventListener("input", (event) => {
   state.draft = event.target.value;

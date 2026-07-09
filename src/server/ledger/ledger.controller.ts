@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Headers, HttpCode, HttpException, HttpStatus, Param, Patch, Post, Query, Req, Res } from "@nestjs/common";
 import type { Request, Response } from "express";
 import { AuthService } from "../auth/auth.service.js";
+import { LarkOAuthService } from "../auth/lark-oauth.service.js";
 import {
   actorFromPayload,
   createLog,
@@ -26,6 +27,7 @@ export class LedgerController {
   constructor(
     private readonly store: LedgerStoreService,
     private readonly auth: AuthService,
+    private readonly larkOAuth: LarkOAuthService,
     private readonly queue: QueueService
   ) {}
 
@@ -89,6 +91,7 @@ export class LedgerController {
       ok: true,
       authenticated: Boolean(user),
       user,
+      larkOAuthEnabled: this.larkOAuth.isConfigured(),
       mockUsers: process.env.AUTH_MOCK_ENABLED === "false" ? [] : this.auth.mockLoginUsers()
     };
   }
@@ -118,24 +121,40 @@ export class LedgerController {
   }
 
   @Get("api/auth/lark/login")
-  larkLogin(@Res() response: Response) {
-    if (!process.env.LARK_APP_ID || !process.env.LARK_APP_SECRET || !process.env.LARK_REDIRECT_URI) {
+  larkLogin(@Query("next") next = "/", @Res() response: Response) {
+    if (!this.larkOAuth.isConfigured()) {
       response.status(501).json({
         ok: false,
+        missing: this.larkOAuth.missingConfig(),
         message: "飞书 OAuth 尚未配置，请先设置 LARK_APP_ID、LARK_APP_SECRET、LARK_REDIRECT_URI。本地开发可使用模拟登录。"
       });
       return;
     }
-    response.status(501).json({ ok: false, message: "飞书 OAuth 授权跳转入口已预留，下一步接入真实飞书授权 URL。" });
+    response.redirect(this.larkOAuth.authorizationUrl(this.auth.signOAuthState(next)));
   }
 
   @Get("api/auth/lark/callback")
-  larkCallback(@Query("code") code = "", @Res() response: Response) {
-    response.status(501).json({
-      ok: false,
-      code,
-      message: "飞书 OAuth 回调入口已预留，待接入 code 换 token 和用户信息接口。"
-    });
+  async larkCallback(@Query("code") code = "", @Query("state") state = "", @Res() response: Response) {
+    if (!code) {
+      response.status(400).json({ ok: false, message: "飞书 OAuth 回调缺少 code" });
+      return;
+    }
+    const verifiedState = this.auth.verifyOAuthState(state);
+    if (!verifiedState) {
+      response.status(400).json({ ok: false, message: "飞书 OAuth state 无效或已过期，请重新登录" });
+      return;
+    }
+    try {
+      const user = await this.larkOAuth.exchangeCodeForUser(code);
+      await this.store.upsertUser(user);
+      this.setSessionCookie(response, this.auth.tokenForUser(user));
+      response.redirect(verifiedState.next);
+    } catch (error) {
+      response.status(502).json({
+        ok: false,
+        message: error instanceof Error ? error.message : "飞书 OAuth 登录失败"
+      });
+    }
   }
 
   @Post("api/requests")

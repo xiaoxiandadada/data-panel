@@ -1,11 +1,17 @@
 import { Injectable } from "@nestjs/common";
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { AppUser, UserRole } from "../core/types.js";
 
 interface TokenPayload {
   role: "admin" | UserRole;
   exp: number;
   user?: AppUser;
+}
+
+interface OAuthStatePayload {
+  exp: number;
+  nonce: string;
+  next: string;
 }
 
 function base64url(input: string | Buffer): string {
@@ -81,23 +87,25 @@ export class AuthService {
   }
 
   verifyToken(token: string | undefined): AppUser | null {
-    if (!token) return null;
-    const parts = token.split(".");
-    if (parts.length !== 2) return null;
-    const [payloadPart, signature] = parts;
-    const expected = this.signature(payloadPart);
-    const signatureBuffer = Buffer.from(signature);
-    const expectedBuffer = Buffer.from(expected);
-    if (signatureBuffer.length !== expectedBuffer.length || !timingSafeEqual(signatureBuffer, expectedBuffer)) return null;
-    try {
-      const payload = JSON.parse(Buffer.from(payloadPart, "base64url").toString("utf8")) as TokenPayload;
-      if (payload.exp <= Math.floor(Date.now() / 1000)) return null;
-      if (payload.user) return payload.user;
-      if (payload.role === "admin") return this.mockUsers.find((item) => item.role === "super_admin") || null;
-      return null;
-    } catch {
-      return null;
-    }
+    const payload = this.verifySignedPayload<TokenPayload>(token);
+    if (!payload) return null;
+    if (payload.user) return payload.user;
+    if (payload.role === "admin") return this.mockUsers.find((item) => item.role === "super_admin") || null;
+    return null;
+  }
+
+  signOAuthState(next = "/"): string {
+    return this.sign({
+      exp: Math.floor(Date.now() / 1000) + 10 * 60,
+      nonce: randomUUID(),
+      next: this.safeNextPath(next)
+    });
+  }
+
+  verifyOAuthState(state: string | undefined): { next: string } | null {
+    const payload = this.verifySignedPayload<OAuthStatePayload>(state);
+    if (!payload) return null;
+    return { next: this.safeNextPath(payload.next) };
   }
 
   cookieOptions(): string {
@@ -112,9 +120,31 @@ export class AuthService {
     return this.mockUsers;
   }
 
-  private sign(payload: TokenPayload): string {
+  private sign(payload: TokenPayload | OAuthStatePayload): string {
     const payloadPart = base64url(JSON.stringify(payload));
     return `${payloadPart}.${this.signature(payloadPart)}`;
+  }
+
+  private verifySignedPayload<T extends { exp: number }>(token: string | undefined): T | null {
+    if (!token) return null;
+    const parts = token.split(".");
+    if (parts.length !== 2) return null;
+    const [payloadPart, signature] = parts;
+    const expected = this.signature(payloadPart);
+    const signatureBuffer = Buffer.from(signature);
+    const expectedBuffer = Buffer.from(expected);
+    if (signatureBuffer.length !== expectedBuffer.length || !timingSafeEqual(signatureBuffer, expectedBuffer)) return null;
+    try {
+      const payload = JSON.parse(Buffer.from(payloadPart, "base64url").toString("utf8")) as T;
+      if (payload.exp <= Math.floor(Date.now() / 1000)) return null;
+      return payload;
+    } catch {
+      return null;
+    }
+  }
+
+  private safeNextPath(next: string): string {
+    return next.startsWith("/") && !next.startsWith("//") ? next : "/";
   }
 
   private expiresAt(): number {

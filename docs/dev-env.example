@@ -1,0 +1,31 @@
+NODE_ENV=dev
+HOST=0.0.0.0
+PORT=5173
+
+# Local emergency admin password. Formal login should use Feishu OAuth.
+ADMIN_PASSWORD=<replace-with-strong-admin-password>
+AUTH_SECRET=<replace-with-random-64-char-secret>
+AUTH_MOCK_ENABLED=false
+
+# Feishu OAuth app. Fill these from Feishu Developer Console.
+LARK_APP_ID=<Feishu App ID, for example cli_xxxxxxxxxxxxxxxx>
+LARK_APP_SECRET=<Feishu App Secret>
+LARK_REDIRECT_URI=https://<deployment-domain>/api/auth/lark/callback
+LARK_AUTH_HOST=https://open.feishu.cn
+LARK_API_HOST=https://open.feishu.cn
+
+# Admin role mapping. Prefer emails first; open_id can be used later if email permission is unavailable.
+LARK_SUPER_ADMIN_EMAILS=<super-admin-email>
+LARK_DELIVERY_ADMIN_EMAILS=<delivery-admin-email-1>,<delivery-admin-email-2>
+LARK_PURCHASE_ADMIN_EMAILS=<purchase-admin-email-1>
+LARK_SUPER_ADMIN_OPEN_IDS=
+LARK_DELIVERY_ADMIN_OPEN_IDS=
+LARK_PURCHASE_ADMIN_OPEN_IDS=
+
+# Feishu Base configuration.
+LARK_BASE_TOKEN=
+LARK_LEDGER_TABLE_ID=tbl7FrAYMpseNuPA
+LARK_REQUEST_TABLE_ID=tblrdV8pbi1Ny9mJ
+
+# Optional bot webhook for status-change notifications.
+LARK_WEBHOOK_URL=

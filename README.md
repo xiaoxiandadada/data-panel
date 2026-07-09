@@ -126,15 +126,15 @@ ADMIN_PASSWORD=你的口令 npm run start
 - 后端：NestJS + TypeScript。API 已拆为 Controller、Service、Store 层，便于继续接入鉴权、队列和外部系统。
 - 数据存储：PostgreSQL 为主存储，保存台账记录和变更日志；无 `DATABASE_URL` 时自动降级到本地 JSON。
 - 异步能力：Redis 用于事件队列，当前记录需求提交、关注人变更、导入和字段更新事件，后续可接飞书通知和同步任务。
-- 权限模式：本地通过 session cookie 识别当前用户；需求方只读取本人相关需求，管理员可读取完整 `/api/data` 并写入数据。旧的 `x-admin-token` 仍保留用于接口调试。
+- 权限模式：本地通过 session cookie 识别当前用户；需求方只读取本人相关需求，管理员可读取完整 `/api/data` 并写入数据。飞书 OAuth 用户会按 open_id/email 映射管理员角色，旧的 `x-admin-token` 仍保留用于接口调试。
 - 部署方式：React 构建产物 + NestJS API 单镜像，配套 PostgreSQL、Redis 使用 Docker Compose 部署。
-- 生产化预留：真实飞书 OAuth login/callback 入口、飞书通讯录、飞书 Base 同步、Prometheus 指标、Nginx HTTPS 和横向扩容。
+- 生产化预留：飞书通讯录人员选择、飞书 Base 双向同步、Prometheus 指标、Nginx HTTPS 和横向扩容。
 
 ## 飞书集成方向
 
 后续正式部署建议接入飞书：
 
-- 登录：当前已实现本地 mock 登录、session cookie 和 `/api/auth/me`；正式环境用飞书 OAuth 替代 mock 登录和管理员口令。
+- 登录：已实现本地 mock 登录、session cookie、`/api/auth/me` 和飞书 OAuth login/callback；正式环境建议关闭 mock 登录，用飞书账号识别需求方和管理员角色。
 - 人员选择：`需求负责人`、`需求人`、`关注人`、`解决方案负责人` 等字段使用飞书通讯录搜索选择，保存 `open_id`，页面展示姓名。
 - 数据：需求提交写入飞书提需求表，交付台账读取和更新飞书总表。
 - 通知：新需求、状态变更、关注人变更通过飞书机器人或消息能力通知相关人员。
@@ -157,6 +157,19 @@ AUTH_MOCK_ENABLED=false
 LARK_APP_ID=飞书应用 App ID
 LARK_APP_SECRET=飞书应用 App Secret
 LARK_REDIRECT_URI=https://你的域名/api/auth/lark/callback
+LARK_SUPER_ADMIN_OPEN_IDS=超级管理员open_id
+LARK_DELIVERY_ADMIN_OPEN_IDS=交付管理员open_id
+LARK_PURCHASE_ADMIN_OPEN_IDS=采购管理员open_id
+```
+
+给部署人交接时，可以直接参考 [docs/dev-env.example](/Users/fairy/Documents/interview/ailab/data-panel/docs/dev-env.example) 和 [docs/feishu-oauth-setup.md](/Users/fairy/Documents/interview/ailab/data-panel/docs/feishu-oauth-setup.md)。这些文件只放变量模板和操作说明，不放真实密钥；生产环境的 `LARK_APP_SECRET` 应由飞书应用所有者通过安全渠道交给部署人。
+
+也可以用邮箱映射管理员角色：
+
+```env
+LARK_SUPER_ADMIN_EMAILS=admin@example.com
+LARK_DELIVERY_ADMIN_EMAILS=delivery@example.com
+LARK_PURCHASE_ADMIN_EMAILS=purchase@example.com
 ```
 
 ## 接口写入数据
