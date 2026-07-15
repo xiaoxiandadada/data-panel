@@ -1199,11 +1199,11 @@ function updateLoginGate() {
 
   if (copy) {
     copy.textContent = oauthMode
-      ? "使用飞书账号登录后，需求方进入个人进展；仅预先配置的管理员可进入对应负责人视图。"
+      ? "需求方登录后查看个人进展；仅预先配置的负责人可进入对应工作台。"
       : "需求方可注册或登录后查看自己的需求进展并提交新需求，管理员维护台账和负责人视图。";
   }
-  if (requesterLoginLabel) requesterLoginLabel.textContent = oauthMode ? "飞书登录" : "需求方登录";
-  if (requesterLoginHint) requesterLoginHint.textContent = oauthMode ? "登录后查看我的需求进展" : "查看我的需求进展";
+  if (requesterLoginLabel) requesterLoginLabel.textContent = "需求方登录";
+  if (requesterLoginHint) requesterLoginHint.textContent = oauthMode ? "使用飞书账号验证身份" : "查看我的需求进展";
   requesterRegisterButton.classList.toggle("hidden", oauthMode);
   if (adminLoginLabel) adminLoginLabel.textContent = oauthMode ? "管理员登录" : "管理员登录";
   if (adminLoginHint) adminLoginHint.textContent = oauthMode ? "仅已配置管理员可进入" : "维护台账与负责人视图";

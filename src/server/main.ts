@@ -20,7 +20,12 @@ async function bootstrap() {
   app.use(urlencoded({ extended: true, limit: "25mb" }));
   app.use(express.static(clientRoot, {
     fallthrough: true,
-    index: "index.html"
+    index: "index.html",
+    setHeaders(response, filePath) {
+      if (filePath.endsWith("index.html")) {
+        response.setHeader("Cache-Control", "no-store");
+      }
+    }
   }));
 
   await app.listen(port, host);
