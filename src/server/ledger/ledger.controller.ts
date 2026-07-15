@@ -2,6 +2,7 @@ import { Body, Controller, Get, Headers, HttpCode, HttpException, HttpStatus, Pa
 import type { Request, Response } from "express";
 import { AuthService } from "../auth/auth.service.js";
 import { LarkOAuthService } from "../auth/lark-oauth.service.js";
+import { canEditAdminFields, canReadLogField, isSuperAdmin, projectDatasetForAdmin } from "../core/admin-views.js";
 import {
   actorFromPayload,
   createLog,
@@ -50,7 +51,8 @@ export class LedgerController {
   @Get("api/data")
   async data(@Req() request: Request, @Headers("x-admin-token") token?: string) {
     const dataset = await this.store.readDataset();
-    return this.isAdminRequest(request, token) ? dataset : publicDataset(dataset);
+    const admin = this.adminUser(request, token);
+    return admin ? projectDatasetForAdmin(dataset, admin) : publicDataset(dataset);
   }
 
   @Get("api/search")
@@ -140,7 +142,7 @@ export class LedgerController {
   }
 
   @Get("api/auth/lark/login")
-  larkLogin(@Query("next") next = "/", @Res() response: Response) {
+  larkLogin(@Query("next") next = "/", @Query("adminOnly") adminOnly = "", @Res() response: Response) {
     if (!this.larkOAuth.isConfigured()) {
       response.status(501).json({
         ok: false,
@@ -149,7 +151,7 @@ export class LedgerController {
       });
       return;
     }
-    response.redirect(this.larkOAuth.authorizationUrl(this.auth.signOAuthState(next)));
+    response.redirect(this.larkOAuth.authorizationUrl(this.auth.signOAuthState(next, adminOnly === "1")));
   }
 
   @Get("api/auth/lark/callback")
@@ -165,6 +167,10 @@ export class LedgerController {
     }
     try {
       const user = await this.larkOAuth.exchangeCodeForUser(code);
+      if (verifiedState.adminOnly && !this.auth.isAdminUser(user)) {
+        response.redirect(`${verifiedState.next}${verifiedState.next.includes("?") ? "&" : "?"}auth_error=admin_only`);
+        return;
+      }
       await this.store.upsertUser(user);
       this.setSessionCookie(response, this.auth.tokenForUser(user));
       response.redirect(verifiedState.next);
@@ -240,11 +246,12 @@ export class LedgerController {
   @Get("api/records/:id/logs")
   async logs(@Req() request: Request, @Headers("x-admin-token") token: string | undefined, @Param("id") recordId: string) {
     this.requireAdmin(request, token);
+    const user = this.adminUser(request, token);
     const dataset = await this.store.readDataset();
     if (!dataset.records.some((record) => record.record_id === recordId)) {
       throw new HttpException({ ok: false, message: "记录不存在" }, HttpStatus.NOT_FOUND);
     }
-    return { ok: true, logs: await this.store.readLogs(recordId) };
+    return { ok: true, logs: (await this.store.readLogs(recordId)).filter((log) => canReadLogField(user, log.field)) };
   }
 
   @Post("api/import")
@@ -255,7 +262,7 @@ export class LedgerController {
     @Query("dryRun") dryRun: string | undefined,
     @Body() parsedBody: unknown
   ) {
-    this.requireAdmin(request, token);
+    this.requireSuperAdmin(request, token);
     const contentType = request.headers["content-type"] || "";
     const payload = contentType.includes("text/csv") ? parseCsv(await this.readRawBody(request)) : parsedBody;
     const dataset = normalizeImport(payload);
@@ -268,7 +275,7 @@ export class LedgerController {
   @Post("api/records")
   @HttpCode(200)
   async createRecord(@Req() request: Request, @Headers("x-admin-token") token: string | undefined, @Body() payload: { fields?: Record<string, FieldValue>; actor?: string }) {
-    this.requireAdmin(request, token);
+    this.requireSuperAdmin(request, token);
     const user = this.currentUser(request);
     const dataset = await this.store.readDataset();
     const record: LedgerRecord = {
@@ -300,12 +307,21 @@ export class LedgerController {
   @Patch("api/records/:id")
   async updateRecord(@Req() request: Request, @Headers("x-admin-token") token: string | undefined, @Param("id") recordId: string, @Body() payload: { fields?: Record<string, FieldValue>; actor?: string }) {
     this.requireAdmin(request, token);
+    const admin = this.adminUser(request, token);
     const user = this.currentUser(request);
+    if (!canEditAdminFields(admin, payload.fields || {})) {
+      throw new HttpException({ ok: false, message: "只能维护分配给当前管理员的字段" }, HttpStatus.FORBIDDEN);
+    }
     const { dataset, beforeFields, record } = await this.store.updateRecord(recordId, payload.fields || {});
     if (!record) throw new HttpException({ ok: false, message: "记录不存在" }, HttpStatus.NOT_FOUND);
     await this.store.appendFieldChangeLogs(recordId, beforeFields, payload.fields || {}, actorFromPayload(payload, user?.name || "管理员"), user?.role || "admin");
     await this.queue.enqueue("record.updated", { recordId, fields: Object.keys(payload.fields || {}) });
-    return { ok: true, record, data: dataset };
+    const projected = projectDatasetForAdmin(dataset, admin);
+    return {
+      ok: true,
+      record: projected.records.find((item) => item.record_id === recordId),
+      data: projected
+    };
   }
 
   private requireAdmin(request: Request, token: string | undefined) {
@@ -314,8 +330,21 @@ export class LedgerController {
     }
   }
 
+  private requireSuperAdmin(request: Request, token: string | undefined) {
+    if (!isSuperAdmin(this.adminUser(request, token))) {
+      throw new HttpException({ ok: false, message: "需要超级管理员权限" }, HttpStatus.FORBIDDEN);
+    }
+  }
+
   private isAdminRequest(request: Request, token: string | undefined): boolean {
-    return this.auth.isAdmin(token) || this.auth.isAdminUser(this.currentUser(request));
+    return Boolean(this.adminUser(request, token));
+  }
+
+  private adminUser(request: Request, token: string | undefined): AppUser | null {
+    const tokenUser = this.auth.verifyToken(token);
+    if (this.auth.isAdminUser(tokenUser)) return tokenUser;
+    const sessionUser = this.currentUser(request);
+    return this.auth.isAdminUser(sessionUser) ? sessionUser : null;
   }
 
   private currentUser(request: Request): AppUser | null {

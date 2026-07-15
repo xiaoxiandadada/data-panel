@@ -12,6 +12,7 @@ interface OAuthStatePayload {
   exp: number;
   nonce: string;
   next: string;
+  adminOnly?: boolean;
 }
 
 function base64url(input: string | Buffer): string {
@@ -94,18 +95,19 @@ export class AuthService {
     return null;
   }
 
-  signOAuthState(next = "/"): string {
+  signOAuthState(next = "/", adminOnly = false): string {
     return this.sign({
       exp: Math.floor(Date.now() / 1000) + 10 * 60,
       nonce: randomUUID(),
-      next: this.safeNextPath(next)
+      next: this.safeNextPath(next),
+      adminOnly
     });
   }
 
-  verifyOAuthState(state: string | undefined): { next: string } | null {
+  verifyOAuthState(state: string | undefined): { next: string; adminOnly: boolean } | null {
     const payload = this.verifySignedPayload<OAuthStatePayload>(state);
     if (!payload) return null;
-    return { next: this.safeNextPath(payload.next) };
+    return { next: this.safeNextPath(payload.next), adminOnly: Boolean(payload.adminOnly) };
   }
 
   cookieOptions(): string {

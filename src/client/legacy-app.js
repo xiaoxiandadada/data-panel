@@ -213,6 +213,7 @@ let state = {
   publicRecords: [],
   suggestionRecords: [],
   meta: {},
+  authError: "",
   authRole: "",
   currentUser: null,
   mockUsers: [],
@@ -242,6 +243,34 @@ const el = (id) => document.getElementById(id);
 
 function isOAuthMode() {
   return state.larkOAuthEnabled && !state.mockUsers.length;
+}
+
+function isSuperAdmin() {
+  return state.currentUser?.role === "super_admin";
+}
+
+function ownerNames(owner) {
+  return String(owner || "")
+    .split(/[、,，/\s]+/)
+    .map((name) => normalizeText(name))
+    .filter(Boolean);
+}
+
+function availableOwnerGroups() {
+  if (!state.adminMode) return [];
+  if (isSuperAdmin()) return OWNER_FIELD_GROUPS;
+  const currentName = normalizeText(state.currentUser?.name || "");
+  return OWNER_FIELD_GROUPS.filter((group) => group.id !== "super" && ownerNames(group.owner).includes(currentName));
+}
+
+function activeOwnerGroup() {
+  const groups = availableOwnerGroups();
+  return groups.find((item) => item.id === state.ownerGroupId) || groups[0] || null;
+}
+
+function canEditOwnerField(field) {
+  if (isSuperAdmin()) return true;
+  return Boolean(activeOwnerGroup()?.fields.includes(field));
 }
 
 function escapeHtml(value) {
@@ -354,9 +383,11 @@ function renderMeta(meta) {
 
 function updateNotice(meta) {
   const notice = el("notice");
-  if (meta.status === "error" || (state.adminMode && !state.records.length)) {
+  if (state.authError || meta.status === "error" || (state.adminMode && !state.records.length)) {
     notice.classList.remove("hidden");
-    notice.innerHTML = meta.status === "error"
+    notice.innerHTML = state.authError
+      ? escapeHtml(state.authError)
+      : meta.status === "error"
       ? `数据尚未导入：${escapeHtml(meta.message || "当前本地数据为空")}。管理员可进入管理员模式后点击“导入数据”录入。`
       : "当前本地数据为空。管理员可进入管理员模式后点击“导入数据”录入。";
   } else {
@@ -943,7 +974,7 @@ function renderGenericTable(containerId, records, columns, editable = false) {
 function renderRowWithColumns(record, columns, editable = false) {
   const cells = columns.map((column) => {
     const value = cell(record, column);
-    if (column === "获取状态" && editable) {
+    if (column === "获取状态" && editable && canEditOwnerField(column)) {
       return `<td class="status-cell">${renderStatusSelect(record, value)}</td>`;
     }
     const className = column === "项目名称" ? "project-name-cell" : "";
@@ -963,10 +994,18 @@ function renderRowWithColumns(record, columns, editable = false) {
 }
 
 function renderOwnerView(records) {
-  const group = OWNER_FIELD_GROUPS.find((item) => item.id === state.ownerGroupId) || OWNER_FIELD_GROUPS[0];
+  const groups = availableOwnerGroups();
+  const group = activeOwnerGroup();
   el("ownerViewSection").classList.remove("hidden");
-  el("ownerViewCount").textContent = `${OWNER_FIELD_GROUPS.length} 组`;
-  el("ownerTabs").innerHTML = OWNER_FIELD_GROUPS.map((item) => `
+  el("ownerViewCount").textContent = `${groups.length} 组`;
+  if (!group) {
+    el("ownerTabs").innerHTML = "";
+    el("ownerFieldChips").innerHTML = `<div class="owner-description">当前飞书账号已是管理员，但尚未匹配到负责字段视图。请由超级管理员为该账号配置对应负责人权限。</div>`;
+    el("ownerRecords").innerHTML = `<div class="empty">暂无可维护的字段视图</div>`;
+    return;
+  }
+  state.ownerGroupId = group.id;
+  el("ownerTabs").innerHTML = groups.map((item) => `
     <button class="role-tab ${item.id === group.id ? "active" : ""}" type="button" data-owner-group="${escapeHtml(item.id)}">
       <span>${escapeHtml(item.name)}</span>
       <small>${escapeHtml(item.owner)}</small>
@@ -1017,7 +1056,11 @@ function renderAnalytics(records) {
 
 function renderWorkspace() {
   const records = filteredRecords();
-  const showAdminData = state.adminMode && state.activeView === "ledger";
+  const superAdmin = isSuperAdmin();
+  if (state.adminMode && !superAdmin && state.activeView !== "owners") {
+    state.activeView = "owners";
+  }
+  const showAdminData = state.adminMode && superAdmin && state.activeView === "ledger";
 
   el("loginGate").classList.toggle("hidden", Boolean(state.authRole));
   el("requesterSection").classList.toggle("hidden", state.authRole !== "requester");
@@ -1026,7 +1069,9 @@ function renderWorkspace() {
   el("dashboardSection").classList.toggle("hidden", !showAdminData);
   el("worklistSection").classList.toggle("hidden", !showAdminData);
   el("ownerViewSection").classList.toggle("hidden", !state.adminMode || state.activeView !== "owners");
-  el("analyticsSection").classList.toggle("hidden", !state.adminMode || state.activeView !== "analytics");
+  el("analyticsSection").classList.toggle("hidden", !state.adminMode || !superAdmin || state.activeView !== "analytics");
+  el("adminTabs").classList.toggle("hidden", !state.adminMode || !superAdmin);
+  el("importButton").classList.toggle("hidden", !superAdmin);
   el("filterGrid").classList.add("hidden");
   el("activeFilters").classList.add("hidden");
 
@@ -1044,9 +1089,11 @@ function renderWorkspace() {
     return;
   }
 
-  el("adminTabs").querySelectorAll("[data-view]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.view === state.activeView);
-  });
+  if (superAdmin) {
+    el("adminTabs").querySelectorAll("[data-view]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.view === state.activeView);
+    });
+  }
 
   if (showAdminData) {
     renderKpis(records);
@@ -1056,7 +1103,7 @@ function renderWorkspace() {
     renderTable(records);
   } else if (state.activeView === "owners") {
     renderOwnerView(records);
-  } else if (state.activeView === "analytics") {
+  } else if (superAdmin && state.activeView === "analytics") {
     renderAnalytics(records);
   }
   updateModeUI();
@@ -1152,14 +1199,14 @@ function updateLoginGate() {
 
   if (copy) {
     copy.textContent = oauthMode
-      ? "使用飞书账号登录后，系统会按企业身份识别需求方或管理员权限。"
+      ? "使用飞书账号登录后，需求方进入个人进展；仅预先配置的管理员可进入对应负责人视图。"
       : "需求方可注册或登录后查看自己的需求进展并提交新需求，管理员维护台账和负责人视图。";
   }
   if (requesterLoginLabel) requesterLoginLabel.textContent = oauthMode ? "飞书登录" : "需求方登录";
-  if (requesterLoginHint) requesterLoginHint.textContent = oauthMode ? "需求方与管理员统一认证" : "查看我的需求进展";
+  if (requesterLoginHint) requesterLoginHint.textContent = oauthMode ? "登录后查看我的需求进展" : "查看我的需求进展";
   requesterRegisterButton.classList.toggle("hidden", oauthMode);
   if (adminLoginLabel) adminLoginLabel.textContent = oauthMode ? "管理员登录" : "管理员登录";
-  if (adminLoginHint) adminLoginHint.textContent = oauthMode ? "按飞书权限进入后台" : "维护台账与负责人视图";
+  if (adminLoginHint) adminLoginHint.textContent = oauthMode ? "仅已配置管理员可进入" : "维护台账与负责人视图";
 
   if (oauthMode && el("requesterAuthDialog").open) {
     el("requesterAuthDialog").close();
@@ -1178,7 +1225,7 @@ function applyUser(user) {
   state.authRole = adminRoles.includes(user.role) ? "admin" : "requester";
   state.adminMode = state.authRole === "admin";
   state.requesterName = state.authRole === "requester" ? user.name : "";
-  state.activeView = state.authRole === "admin" ? "ledger" : "requester";
+  state.activeView = state.authRole === "admin" ? (user.role === "super_admin" ? "ledger" : "owners") : "requester";
 }
 
 async function loadSession() {
@@ -1187,6 +1234,11 @@ async function loadSession() {
   state.larkOAuthEnabled = Boolean(session.larkOAuthEnabled);
   if (session.authenticated) {
     applyUser(session.user);
+  }
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("auth_error") === "admin_only") {
+    state.authError = "该飞书账号未被配置为管理员，请从需求方入口登录。";
+    window.history.replaceState({}, "", window.location.pathname);
   }
 }
 
@@ -1235,7 +1287,7 @@ function closeRequesterAuthDialog() {
 
 function openAdminLogin() {
   if (isOAuthMode()) {
-    window.location.href = `/api/auth/lark/login?next=${encodeURIComponent("/")}`;
+    window.location.href = `/api/auth/lark/login?adminOnly=1&next=${encodeURIComponent("/")}`;
     return;
   }
   el("adminPassword").value = "";
@@ -1347,9 +1399,13 @@ function renderRecordControl(name, value, index) {
 
 function openRecordDialog(record = null) {
   if (!state.adminMode) return;
+  if (!record && !isSuperAdmin()) return;
   state.editingRecordId = record?.record_id || null;
   el("recordDialogTitle").textContent = record ? "编辑项目数据" : "导入项目数据";
-  el("recordFormFields").innerHTML = state.fields.map((field, index) => {
+  const editableFields = isSuperAdmin()
+    ? state.fields
+    : state.fields.filter((field) => canEditOwnerField(field.name || field.id));
+  el("recordFormFields").innerHTML = editableFields.map((field, index) => {
     const name = field.name || field.id;
     const value = record ? cell(record, name) : "";
     const control = renderRecordControl(name, value, index);
@@ -1491,6 +1547,7 @@ el("adminTabs").addEventListener("click", (event) => {
 el("ownerTabs").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-owner-group]");
   if (!button) return;
+  if (!availableOwnerGroups().some((group) => group.id === button.dataset.ownerGroup)) return;
   state.ownerGroupId = button.dataset.ownerGroup;
   renderWorkspace();
 });
