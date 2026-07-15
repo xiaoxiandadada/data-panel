@@ -10,7 +10,7 @@ FROM deps AS build
 WORKDIR /app
 
 COPY . .
-RUN npm run build
+RUN rm -rf dist && npm run build
 
 FROM gitlab.pjlab.org.cn:5050/dps-registry/hub/node:22-alpine AS runtime
 

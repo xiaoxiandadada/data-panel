@@ -43,7 +43,7 @@ build:
       --context "${CI_PROJECT_DIR}"
       --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
       --destination "${IMAGE_NAME}"
-      --cache=true
+      --cache=false
       --force
 
 confirm_production_deployment:
