@@ -1193,7 +1193,6 @@ function updateLoginGate() {
   const copy = loginGate.querySelector(".login-copy > p:not(.eyebrow)");
   const requesterLoginLabel = el("requesterLoginButton").querySelector("span");
   const requesterLoginHint = el("requesterLoginButton").querySelector("small");
-  const requesterRegisterButton = el("requesterRegisterButton");
   const adminLoginLabel = el("adminLoginButton").querySelector("span");
   const adminLoginHint = el("adminLoginButton").querySelector("small");
 
@@ -1204,7 +1203,6 @@ function updateLoginGate() {
   }
   if (requesterLoginLabel) requesterLoginLabel.textContent = "需求方登录";
   if (requesterLoginHint) requesterLoginHint.textContent = oauthMode ? "使用飞书账号验证身份" : "查看我的需求进展";
-  requesterRegisterButton.classList.toggle("hidden", oauthMode);
   if (adminLoginLabel) adminLoginLabel.textContent = oauthMode ? "管理员登录" : "管理员登录";
   if (adminLoginHint) adminLoginHint.textContent = oauthMode ? "仅已配置管理员可进入" : "维护台账与负责人视图";
 
@@ -1552,7 +1550,6 @@ el("ownerTabs").addEventListener("click", (event) => {
   renderWorkspace();
 });
 el("requesterLoginButton").addEventListener("click", () => openRequesterAuthDialog("login"));
-el("requesterRegisterButton").addEventListener("click", () => openRequesterAuthDialog("register"));
 el("adminLoginButton").addEventListener("click", openAdminLogin);
 el("requestSubmitButton").addEventListener("click", () => {
   openRequestDialog();
