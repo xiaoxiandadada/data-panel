@@ -98,6 +98,9 @@ export class LedgerController {
   @Post("api/admin/login")
   @HttpCode(200)
   async login(@Body() body: { password?: string }, @Res({ passthrough: true }) response: Response) {
+    if (process.env.AUTH_MOCK_ENABLED === "false") {
+      throw new HttpException({ ok: false, message: "当前环境已关闭管理员口令登录，请使用飞书管理员登录" }, HttpStatus.FORBIDDEN);
+    }
     const result = this.auth.login(String(body?.password || ""));
     if (!result.ok) throw new HttpException(result, HttpStatus.UNAUTHORIZED);
     await this.store.upsertUser(result.user);
