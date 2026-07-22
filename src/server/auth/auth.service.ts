@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { AppUser, UserRole } from "../core/types.js";
+import { hasAdminRole, hasUserRole, normalizeUserRoles, primaryUserRole, rolesForUser } from "../core/user-roles.js";
 
 interface TokenPayload {
   role: "admin" | UserRole;
@@ -31,10 +32,9 @@ export class AuthService {
   private readonly sessionMaxAgeSeconds = 8 * 60 * 60;
 
   private readonly mockUsers: AppUser[] = [
-    { openId: "mock_wang-guanchu", name: "王冠楚", email: "wangguanchu@example.local", department: "安全可信AGI", role: "requester" },
-    { openId: "mock_gu-yuying", name: "顾语莺", email: "guyuying@example.local", department: "数据平台中心", role: "delivery_admin" },
-    { openId: "mock_purchase-admin", name: "采购负责人", email: "purchase@example.local", department: "采购", role: "purchase_admin" },
-    { openId: "mock_super-admin", name: "超级管理员", email: "super@example.local", department: "管理", role: "super_admin" }
+    { openId: "mock_wang-guanchu", name: "王冠楚", email: "wangguanchu@example.local", department: "安全可信AGI", role: "requester", roles: ["requester"] },
+    { openId: "mock_gu-yuying", name: "顾语莺", email: "guyuying@example.local", department: "数据平台中心", role: "delivery_admin", roles: ["requester", "delivery_admin"] },
+    { openId: "mock_super-admin", name: "超级管理员", email: "super@example.local", department: "管理", role: "super_admin", roles: ["requester", "super_admin"] }
   ];
 
   login(password: string): { ok: true; token: string; user: AppUser } | { ok: false; message: string } {
@@ -56,11 +56,19 @@ export class AuthService {
   }
 
   isAdminUser(user: AppUser | null | undefined): boolean {
-    return Boolean(user && this.isAdminRole(user.role));
+    return hasAdminRole(user);
   }
 
   isAdminRole(role: string | undefined): boolean {
-    return role === "delivery_admin" || role === "purchase_admin" || role === "super_admin" || role === "admin";
+    return role === "delivery_admin" || role === "super_admin" || role === "admin";
+  }
+
+  hasRole(user: AppUser | null | undefined, role: UserRole): boolean {
+    return hasUserRole(user, role);
+  }
+
+  rolesForUser(user: AppUser | null | undefined): UserRole[] {
+    return rolesForUser(user);
   }
 
   tokenForUser(user: AppUser): string {
@@ -76,13 +84,15 @@ export class AuthService {
     if (!cleanName) return { ok: false, message: "请输入姓名或账号" };
     const known = this.mockUsers.find((item) => item.name === cleanName);
     if (!known && !options.register) return { ok: false, message: "未找到该模拟账号，可先注册或选择已有需求方" };
-    const role = options.role || known?.role || "requester";
+    const requestedRoles = normalizeUserRoles([options.role || known?.role || "requester"]);
+    const role = primaryUserRole(requestedRoles);
     const user: AppUser = known || {
       openId: normalizeOpenId(cleanName),
       name: cleanName,
       email: `${normalizeOpenId(cleanName)}@example.local`,
       department: options.department?.trim() || "未设置",
-      role
+      role,
+      roles: requestedRoles
     };
     return { ok: true, token: this.tokenForUser(user), user };
   }

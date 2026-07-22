@@ -8,13 +8,18 @@ export const publicFields = [
   "需求负责人",
   "需求人",
   "关注人",
+  "PM",
   "项目对接人",
   "解决方案负责人",
   "需求提出时间",
   "期望交付日期",
   "Sprint",
   "需求文档",
-  "任务耗时"
+  "任务耗时",
+  "满意度",
+  "满意度评价",
+  "满意度评价来源",
+  "数据来源"
 ];
 
 export const searchFields = [
@@ -74,6 +79,7 @@ export function uniqueRequesterNames(dataset: Dataset): string[] {
       cell(record, "需求负责人"),
       cell(record, "需求人"),
       cell(record, "关注人"),
+      cell(record, "PM"),
       cell(record, "项目对接人"),
       cell(record, "部门负责人")
     ])
@@ -86,8 +92,10 @@ export function requesterRecords(dataset: Dataset, requesterName: string): Ledge
   const normalized = normalizeText(requesterName);
   if (!normalized) return [];
   return (dataset.records || []).filter((record) => {
-    const visibleFields = ["需求负责人", "需求人", "关注人", "项目对接人", "部门负责人"];
-    return visibleFields.some((field) => normalizeText(cell(record, field)).includes(normalized));
+    const visibleFields = ["需求负责人", "需求人", "关注人", "PM", "项目对接人", "部门负责人"];
+    return visibleFields.some((field) => cell(record, field)
+      .split(/[、,，;；/\n]+/)
+      .some((name) => normalizeText(name) === normalized));
   });
 }
 
@@ -162,12 +170,17 @@ export function datasetStats(dataset: Dataset) {
     acc[status] = (acc[status] || 0) + 1;
     return acc;
   }, {});
+  const satisfactionScores = records.map((record) => Number(cell(record, "满意度"))).filter((score) => score >= 1 && score <= 5);
+  const autoGoodCount = records.filter((record) => cell(record, "满意度评价来源") === "系统自动").length;
   return {
     ok: true,
     service: "delivery-pipeline",
     totalRecords: records.length,
     requesterCount: uniqueRequesterNames(dataset).length,
     statusCount: statuses,
+    satisfactionCount: satisfactionScores.length,
+    satisfactionAverage: satisfactionScores.length ? Number((satisfactionScores.reduce((sum, score) => sum + score, 0) / satisfactionScores.length).toFixed(2)) : 0,
+    satisfactionAutoGoodCount: autoGoodCount,
     syncedAt: dataset.meta?.syncedAt || "",
     uptimeSeconds: Math.round(process.uptime())
   };
@@ -184,7 +197,13 @@ export function metricsText(dataset: Dataset): string {
     `delivery_pipeline_requesters_total ${stats.requesterCount}`,
     "# HELP delivery_pipeline_uptime_seconds Process uptime in seconds.",
     "# TYPE delivery_pipeline_uptime_seconds counter",
-    `delivery_pipeline_uptime_seconds ${stats.uptimeSeconds}`
+    `delivery_pipeline_uptime_seconds ${stats.uptimeSeconds}`,
+    "# HELP delivery_pipeline_satisfaction_average Average satisfaction score from 1 to 5.",
+    "# TYPE delivery_pipeline_satisfaction_average gauge",
+    `delivery_pipeline_satisfaction_average ${stats.satisfactionAverage}`,
+    "# HELP delivery_pipeline_satisfaction_auto_good_total Satisfaction ratings automatically defaulted to good.",
+    "# TYPE delivery_pipeline_satisfaction_auto_good_total gauge",
+    `delivery_pipeline_satisfaction_auto_good_total ${stats.satisfactionAutoGoodCount}`
   ];
   Object.entries(stats.statusCount).forEach(([status, count]) => {
     lines.push(`delivery_pipeline_status_records{status="${String(status).replace(/"/g, '\\"')}"} ${count}`);
@@ -217,6 +236,8 @@ export function demandToLedgerFields(payload: Record<string, unknown>, knownFiel
   const demandOwner = String(fields["需求负责人"] || requesterName).trim();
   const demandPeople = String(fields["需求人"] || requesterName).trim();
   const followers = String(fields["关注人"] || "").trim();
+  const needsPm = String(fields["是否设置PM"] || "").trim() === "是";
+  const pm = needsPm ? String(fields["PM"] || "").trim() : "";
   const description = String(fields["需求描述"] || "").trim();
   const projectName = String(fields["245项目名称"] || fields["项目名称"] || description.slice(0, 28) || "未命名需求").trim();
   const remarkParts = [
@@ -234,6 +255,7 @@ export function demandToLedgerFields(payload: Record<string, unknown>, knownFiel
     "需求负责人": demandOwner,
     "需求人": demandPeople,
     "关注人": followers,
+    "PM": pm,
     "项目对接人": requesterName,
     "领域或学科": fields["学科"] || "",
     "需求提出时间": fields["提出时间"] || todayText(),

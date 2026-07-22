@@ -1,5 +1,6 @@
 import { Injectable } from "@nestjs/common";
-import type { AppUser, UserRole } from "../core/types.js";
+import type { AppUser, Dataset, LedgerRecord, UserRole } from "../core/types.js";
+import { normalizeUserRoles, primaryUserRole } from "../core/user-roles.js";
 
 interface LarkOAuthTokenResponse {
   code?: number;
@@ -85,6 +86,10 @@ export class LarkOAuthService {
     return Boolean(this.appId && this.appSecret && this.redirectUri);
   }
 
+  isBotConfigured(): boolean {
+    return Boolean(this.appId && this.appSecret);
+  }
+
   missingConfig(): string[] {
     return [
       ["LARK_APP_ID", this.appId],
@@ -132,6 +137,102 @@ export class LarkOAuthService {
     }
     const users = this.extractSearchUsers(payload);
     return users.slice(0, Math.min(Math.max(Number(limit || 10), 1), 20));
+  }
+
+  async sendTextMessage(openId: string, text: string): Promise<void> {
+    const receiver = cleanEnv(openId);
+    if (!receiver) return;
+    const token = await this.tenantAccessToken();
+    const url = new URL("/open-apis/im/v1/messages", this.apiHost);
+    url.searchParams.set("receive_id_type", "open_id");
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json; charset=utf-8"
+      },
+      body: JSON.stringify({
+        receive_id: receiver,
+        msg_type: "text",
+        content: JSON.stringify({ text })
+      })
+    });
+    const payload = (await response.json().catch(() => null)) as Record<string, any> | null;
+    if (!response.ok || !payload || (typeof payload.code === "number" && payload.code !== 0)) {
+      throw new Error(`飞书个人通知失败：${payload?.msg || payload?.message || response.statusText}`);
+    }
+  }
+
+  async sendWebhookMessage(text: string): Promise<boolean> {
+    const webhook = cleanEnv(process.env.LARK_WEBHOOK_URL);
+    if (!webhook) return false;
+    const response = await fetch(webhook, {
+      method: "POST",
+      headers: { "content-type": "application/json; charset=utf-8" },
+      body: JSON.stringify({ msg_type: "text", content: { text } })
+    });
+    const payload = (await response.json().catch(() => null)) as Record<string, any> | null;
+    const code = payload?.code ?? payload?.StatusCode;
+    if (!response.ok || (code != null && Number(code) !== 0)) {
+      throw new Error(`飞书群通知失败：${payload?.msg || payload?.StatusMessage || response.statusText}`);
+    }
+    return true;
+  }
+
+  async listBaseDataset(appToken: string, tableId: string, viewId = ""): Promise<Dataset> {
+    const cleanAppToken = cleanEnv(appToken);
+    const cleanTableId = cleanEnv(tableId);
+    if (!cleanAppToken || !cleanTableId) throw new Error("飞书 Base 同步缺少 app token 或 table id");
+    const token = await this.tenantAccessToken();
+    const records: LedgerRecord[] = [];
+    let pageToken = "";
+    do {
+      const url = new URL(`/open-apis/bitable/v1/apps/${encodeURIComponent(cleanAppToken)}/tables/${encodeURIComponent(cleanTableId)}/records`, this.apiHost);
+      url.searchParams.set("page_size", "500");
+      if (viewId) url.searchParams.set("view_id", viewId);
+      if (pageToken) url.searchParams.set("page_token", pageToken);
+      const response = await fetch(url, { headers: { authorization: `Bearer ${token}` } });
+      const payload = (await response.json().catch(() => null)) as Record<string, any> | null;
+      if (!response.ok || !payload || payload.code !== 0) {
+        throw new Error(`飞书 Base 同步失败：${payload?.msg || payload?.message || response.statusText}`);
+      }
+      const items = Array.isArray(payload.data?.items) ? payload.data.items : [];
+      records.push(...items.map((item: Record<string, any>, index: number) => ({
+        record_id: cleanEnv(item.record_id || item.id) || `lark-${records.length + index + 1}`,
+        fields: item.fields || {}
+      })));
+      pageToken = payload.data?.has_more ? cleanEnv(payload.data?.page_token) : "";
+    } while (pageToken);
+    const names = [...new Set(records.flatMap((record) => Object.keys(record.fields || {})))];
+    return {
+      meta: {
+        status: "ok",
+        title: cleanTableId,
+        syncedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+        message: `飞书 Base 同步 ${records.length} 条记录`
+      },
+      fields: names.map((name) => ({ id: name, name, type: "text" })),
+      records
+    };
+  }
+
+  async resolveWikiNodeObjectToken(wikiNodeToken: string): Promise<string> {
+    const cleanToken = cleanEnv(wikiNodeToken);
+    if (!cleanToken) throw new Error("飞书 Wiki 节点 token 为空");
+    const token = await this.tenantAccessToken();
+    const url = new URL("/open-apis/wiki/v2/spaces/get_node", this.apiHost);
+    url.searchParams.set("token", cleanToken);
+    url.searchParams.set("obj_type", "wiki");
+    const response = await fetch(url, { headers: { authorization: `Bearer ${token}` } });
+    const payload = (await response.json().catch(() => null)) as Record<string, any> | null;
+    const node = payload?.data?.node;
+    if (!response.ok || !payload || payload.code !== 0 || !node?.obj_token) {
+      throw new Error(`飞书 Wiki 节点解析失败：${payload?.msg || payload?.message || response.statusText}`);
+    }
+    if (node.obj_type && node.obj_type !== "bitable") {
+      throw new Error(`飞书 Wiki 节点不是多维表格：${node.obj_type}`);
+    }
+    return cleanEnv(node.obj_token);
   }
 
   private async tenantAccessToken(): Promise<string> {
@@ -220,17 +321,19 @@ export class LarkOAuthService {
   private toAppUser(profile: NonNullable<LarkUserInfoResponse["data"]>): AppUser {
     const name = cleanEnv(profile.name) || cleanEnv(profile.en_name) || cleanEnv(profile.email) || profile.open_id || "飞书用户";
     const email = cleanEnv(profile.email);
+    const roles = this.resolveRoles(profile);
     return {
       openId: profile.open_id || profile.union_id || profile.user_id || email || name,
       name,
       email,
       avatar: cleanEnv(profile.avatar_url) || cleanEnv(profile.avatar_thumb) || undefined,
       department: cleanEnv(profile.department) || cleanEnv(profile.department_ids?.join(",")) || "未设置",
-      role: this.resolveRole(profile)
+      role: primaryUserRole(roles),
+      roles
     };
   }
 
-  private resolveRole(profile: NonNullable<LarkUserInfoResponse["data"]>): UserRole {
+  private resolveRoles(profile: NonNullable<LarkUserInfoResponse["data"]>): UserRole[] {
     const openId = cleanEnv(profile.open_id).toLowerCase();
     const email = cleanEnv(profile.email).toLowerCase();
     const roleConfigs: RoleConfig[] = [
@@ -243,14 +346,11 @@ export class LarkOAuthService {
         role: "delivery_admin",
         openIds: splitEnvSet(process.env.LARK_DELIVERY_ADMIN_OPEN_IDS),
         emails: splitEnvSet(process.env.LARK_DELIVERY_ADMIN_EMAILS)
-      },
-      {
-        role: "purchase_admin",
-        openIds: splitEnvSet(process.env.LARK_PURCHASE_ADMIN_OPEN_IDS),
-        emails: splitEnvSet(process.env.LARK_PURCHASE_ADMIN_EMAILS)
       }
     ];
-    const matched = roleConfigs.find((item) => item.openIds.has(openId) || item.emails.has(email));
-    return matched?.role || "requester";
+    const matched = roleConfigs
+      .filter((item) => item.openIds.has(openId) || item.emails.has(email))
+      .map((item) => item.role);
+    return normalizeUserRoles(matched);
   }
 }

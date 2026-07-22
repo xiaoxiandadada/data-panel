@@ -3,14 +3,18 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MongoClient, type Collection, type Db, type Document } from "mongodb";
-import type { AppUser, Dataset, LedgerLog, LedgerRecord } from "../core/types.js";
+import type { AppUser, Dataset, ImportBatch, LedgerLog, LedgerRecord, NotificationLog, UserFieldPreferences, UserRole } from "../core/types.js";
 import type { FieldValue } from "../core/types.js";
 import { rowsToDataset, stringifyCell } from "../core/ledger-utils.js";
+import { normalizeUserRoles, primaryUserRole } from "../core/user-roles.js";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
-const dataDir = resolve(root, "data");
+const dataDir = resolve(process.env.DATA_DIR || resolve(root, "data"));
 const dataPath = resolve(dataDir, "project-data.json");
 const ledgerLogPath = resolve(dataDir, "ledger-logs.json");
+const preferencePath = resolve(dataDir, "user-field-preferences.json");
+const importBatchPath = resolve(dataDir, "import-batches.json");
+const notificationLogPath = resolve(dataDir, "notification-logs.json");
 
 type AppStateDoc = Document & {
   key: "meta" | "fields";
@@ -32,6 +36,10 @@ type AppUserDoc = Document & AppUser & {
   created_at: Date;
   last_login_at: Date;
 };
+
+type UserFieldPreferenceDoc = Document & UserFieldPreferences;
+type ImportBatchDoc = Document & ImportBatch & { created_at: Date };
+type NotificationLogDoc = Document & NotificationLog & { created_at: Date };
 
 @Injectable()
 export class LedgerStoreService implements OnModuleInit {
@@ -198,11 +206,21 @@ export class LedgerStoreService implements OnModuleInit {
   async upsertUser(user: AppUser): Promise<void> {
     if (this.mongoReady && this.db) {
       const now = new Date();
+      const existing = await this.appUsers().findOne({ openId: user.openId });
+      const roles = normalizeUserRoles([
+        ...((existing?.roles as UserRole[] | undefined) || []),
+        ...(user.roles || []),
+        user.role
+      ]);
+      const role = primaryUserRole(roles);
+      const { role: _incomingRole, roles: _incomingRoles, ...profile } = user;
       await this.appUsers().updateOne(
         { openId: user.openId },
         {
           $set: {
-            ...user,
+            ...profile,
+            role,
+            roles,
             last_login_at: now
           },
           $setOnInsert: {
@@ -214,8 +232,115 @@ export class LedgerStoreService implements OnModuleInit {
     }
   }
 
+  async listUsers(): Promise<AppUser[]> {
+    if (!this.mongoReady || !this.db) return [];
+    const users = await this.appUsers()
+      .find({}, { projection: { _id: 0, created_at: 0, last_login_at: 0 } })
+      .sort({ name: 1 })
+      .toArray() as unknown as AppUser[];
+    return users.map((user) => this.normalizeStoredUser(user));
+  }
+
+  async findUserByOpenId(openId: string): Promise<AppUser | null> {
+    if (!this.mongoReady || !this.db) return null;
+    const user = await this.appUsers().findOne(
+      { openId },
+      { projection: { _id: 0, created_at: 0, last_login_at: 0 } }
+    ) as AppUser | null;
+    return user ? this.normalizeStoredUser(user) : null;
+  }
+
+  async findUsersByNames(names: string[]): Promise<AppUser[]> {
+    const cleanNames = [...new Set(names.map((name) => String(name || "").trim()).filter(Boolean))];
+    if (!cleanNames.length || !this.mongoReady || !this.db) return [];
+    const users = await this.appUsers()
+      .find({ name: { $in: cleanNames } }, { projection: { _id: 0, created_at: 0, last_login_at: 0 } })
+      .toArray() as unknown as AppUser[];
+    return users.map((user) => this.normalizeStoredUser(user));
+  }
+
+  async updateUserRoles(openId: string, requestedRoles: UserRole[]): Promise<AppUser | null> {
+    if (!this.mongoReady || !this.db) return null;
+    const roles = normalizeUserRoles(requestedRoles);
+    const updated = await this.appUsers().findOneAndUpdate(
+      { openId },
+      { $set: { role: primaryUserRole(roles), roles } },
+      { returnDocument: "after", projection: { _id: 0, created_at: 0, last_login_at: 0 } }
+    );
+    return updated ? this.normalizeStoredUser(updated as AppUser) : null;
+  }
+
+  async updateUserRole(openId: string, role: UserRole): Promise<AppUser | null> {
+    return this.updateUserRoles(openId, [role]);
+  }
+
+  async readUserFieldPreferences(openId: string): Promise<UserFieldPreferences> {
+    const fallback: UserFieldPreferences = { openId, hiddenFields: [], fieldOrder: [], updatedAt: "" };
+    if (this.mongoReady && this.db) {
+      const stored = await this.userFieldPreferences().findOne({ openId }, { projection: { _id: 0 } });
+      return stored ? { ...fallback, ...stored } as UserFieldPreferences : fallback;
+    }
+    const all = existsSync(preferencePath) ? JSON.parse(readFileSync(preferencePath, "utf8")) as UserFieldPreferences[] : [];
+    return all.find((item) => item.openId === openId) || fallback;
+  }
+
+  async saveUserFieldPreferences(preferences: UserFieldPreferences): Promise<UserFieldPreferences> {
+    const normalized: UserFieldPreferences = {
+      openId: preferences.openId,
+      hiddenFields: [...new Set(preferences.hiddenFields || [])],
+      fieldOrder: [...new Set(preferences.fieldOrder || [])],
+      updatedAt: new Date().toISOString()
+    };
+    if (this.mongoReady && this.db) {
+      await this.userFieldPreferences().updateOne({ openId: normalized.openId }, { $set: normalized }, { upsert: true });
+      return normalized;
+    }
+    mkdirSync(dataDir, { recursive: true });
+    const all = existsSync(preferencePath) ? JSON.parse(readFileSync(preferencePath, "utf8")) as UserFieldPreferences[] : [];
+    const next = [...all.filter((item) => item.openId !== normalized.openId), normalized];
+    writeFileSync(preferencePath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+    return normalized;
+  }
+
+  async appendImportBatch(batch: ImportBatch): Promise<void> {
+    if (this.mongoReady && this.db) {
+      await this.importBatches().updateOne({ id: batch.id }, { $set: { ...batch, created_at: new Date() } }, { upsert: true });
+      return;
+    }
+    mkdirSync(dataDir, { recursive: true });
+    const all = existsSync(importBatchPath) ? JSON.parse(readFileSync(importBatchPath, "utf8")) as ImportBatch[] : [];
+    writeFileSync(importBatchPath, `${JSON.stringify([batch, ...all].slice(0, 500), null, 2)}\n`, "utf8");
+  }
+
+  async readImportBatches(limit = 50): Promise<ImportBatch[]> {
+    if (this.mongoReady && this.db) {
+      return this.importBatches()
+        .find({}, { projection: { _id: 0, created_at: 0 } })
+        .sort({ created_at: -1 })
+        .limit(Math.min(Math.max(limit, 1), 200))
+        .toArray() as Promise<ImportBatch[]>;
+    }
+    const all = existsSync(importBatchPath) ? JSON.parse(readFileSync(importBatchPath, "utf8")) as ImportBatch[] : [];
+    return all.slice(0, limit);
+  }
+
+  async appendNotificationLog(log: NotificationLog): Promise<void> {
+    if (this.mongoReady && this.db) {
+      await this.notificationLogs().updateOne({ id: log.id }, { $set: { ...log, created_at: new Date() } }, { upsert: true });
+      return;
+    }
+    mkdirSync(dataDir, { recursive: true });
+    const all = existsSync(notificationLogPath) ? JSON.parse(readFileSync(notificationLogPath, "utf8")) as NotificationLog[] : [];
+    writeFileSync(notificationLogPath, `${JSON.stringify([log, ...all].slice(0, 1000), null, 2)}\n`, "utf8");
+  }
+
   private mongoUri(): string {
     return String(process.env.MONGODB_URI || "").trim();
+  }
+
+  private normalizeStoredUser(user: AppUser): AppUser {
+    const roles = normalizeUserRoles([...(user.roles || []), user.role]);
+    return { ...user, role: primaryUserRole(roles), roles };
   }
 
   private async ensureIndexes() {
@@ -228,7 +353,13 @@ export class LedgerStoreService implements OnModuleInit {
       this.ledgerLogs().createIndex({ id: 1 }, { unique: true }),
       this.ledgerLogs().createIndex({ record_id: 1, created_at: -1 }),
       this.appUsers().createIndex({ openId: 1 }, { unique: true }),
-      this.appUsers().createIndex({ role: 1 })
+      this.appUsers().createIndex({ role: 1 }),
+      this.appUsers().createIndex({ roles: 1 }),
+      this.userFieldPreferences().createIndex({ openId: 1 }, { unique: true }),
+      this.importBatches().createIndex({ id: 1 }, { unique: true }),
+      this.importBatches().createIndex({ created_at: -1 }),
+      this.notificationLogs().createIndex({ id: 1 }, { unique: true }),
+      this.notificationLogs().createIndex({ recordId: 1, created_at: -1 })
     ]);
   }
 
@@ -256,5 +387,17 @@ export class LedgerStoreService implements OnModuleInit {
 
   private appUsers(): Collection<AppUserDoc> {
     return this.db!.collection<AppUserDoc>("app_users");
+  }
+
+  private userFieldPreferences(): Collection<UserFieldPreferenceDoc> {
+    return this.db!.collection<UserFieldPreferenceDoc>("user_field_preferences");
+  }
+
+  private importBatches(): Collection<ImportBatchDoc> {
+    return this.db!.collection<ImportBatchDoc>("import_batches");
+  }
+
+  private notificationLogs(): Collection<NotificationLogDoc> {
+    return this.db!.collection<NotificationLogDoc>("notification_logs");
   }
 }

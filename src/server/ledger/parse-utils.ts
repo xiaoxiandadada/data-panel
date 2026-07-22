@@ -1,5 +1,115 @@
+import readXlsxFile from "read-excel-file/node";
 import type { Dataset, FieldValue } from "../core/types.js";
-import { rowsToDataset } from "../core/ledger-utils.js";
+import { nextRecordId, normalizeText, rowsToDataset, stringifyCell } from "../core/ledger-utils.js";
+
+export interface ImportMergeSummary {
+  total: number;
+  inserted: number;
+  updated: number;
+  unchanged: number;
+  conflicts: number;
+}
+
+export interface ImportMergeResult {
+  dataset: Dataset;
+  summary: ImportMergeSummary;
+}
+
+const keyFields = ["任务代码", "2026需求编码", "需求编码", "项目名称"];
+
+function excelCell(value: unknown): FieldValue {
+  if (value instanceof Date) {
+    const date = new Date(value.getTime() - value.getTimezoneOffset() * 60_000);
+    return date.toISOString().slice(0, 19).replace("T", " ");
+  }
+  if (value == null) return "";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
+  return String(value);
+}
+
+export async function parseExcel(buffer: Buffer): Promise<Array<Record<string, FieldValue>>> {
+  const rows = await readXlsxFile(buffer);
+  const headerRow = rows.shift() || [];
+  const headers = headerRow.map((value, index) => String(value || "").replace(/^\uFEFF/, "").trim() || `字段${index + 1}`);
+  if (!headers.length) throw new Error("Excel 文件没有表头");
+  return rows
+    .filter((row) => row.some((value) => value != null && String(value).trim() !== ""))
+    .map((row) => Object.fromEntries(headers.map((header, index) => [header, excelCell(row[index])])));
+}
+
+export function importBusinessKey(fields: Record<string, FieldValue>): string {
+  for (const field of keyFields) {
+    const value = normalizeText(stringifyCell(fields?.[field]));
+    if (value) return `${field}:${value}`;
+  }
+  const proposedAt = normalizeText(stringifyCell(fields?.["需求提出时间"]));
+  const department = normalizeText(stringifyCell(fields?.["隶属部门"]));
+  return `fallback:${proposedAt}:${department}:${normalizeText(JSON.stringify(fields || {}))}`;
+}
+
+function mergeSources(before: FieldValue, source: string): string {
+  return [...new Set(`${stringifyCell(before)}、${source}`.split(/[、,，]/).map((item) => item.trim()).filter(Boolean))].join("、");
+}
+
+function mergeFields(before: Record<string, FieldValue>, incoming: Record<string, FieldValue>, source: string): Record<string, FieldValue> {
+  const merged = { ...before };
+  for (const [field, value] of Object.entries(incoming || {})) {
+    if (stringifyCell(value).trim() !== "") merged[field] = value;
+  }
+  merged["数据来源"] = mergeSources(before["数据来源"], source);
+  return merged;
+}
+
+export function mergeImportedDataset(existing: Dataset, incoming: Dataset, source: string): ImportMergeResult {
+  const cleanSource = String(source || "未标记来源").trim() || "未标记来源";
+  const records = (existing.records || []).map((record) => ({ ...record, fields: { ...(record.fields || {}) } }));
+  const index = new Map(records.map((record) => [importBusinessKey(record.fields), record]));
+  const incomingKeys = new Set<string>();
+  const summary: ImportMergeSummary = { total: incoming.records?.length || 0, inserted: 0, updated: 0, unchanged: 0, conflicts: 0 };
+
+  for (const item of incoming.records || []) {
+    const key = importBusinessKey(item.fields || {});
+    if (incomingKeys.has(key)) summary.conflicts += 1;
+    incomingKeys.add(key);
+    const current = index.get(key);
+    if (!current) {
+      const record = {
+        record_id: nextRecordId(records),
+        fields: mergeFields({}, item.fields || {}, cleanSource)
+      };
+      records.push(record);
+      index.set(key, record);
+      summary.inserted += 1;
+      continue;
+    }
+    const merged = mergeFields(current.fields || {}, item.fields || {}, cleanSource);
+    if (JSON.stringify(merged) === JSON.stringify(current.fields || {})) {
+      summary.unchanged += 1;
+    } else {
+      current.fields = merged;
+      summary.updated += 1;
+    }
+  }
+
+  const fieldNames = [...new Set([
+    ...(existing.fields || []).map((field) => field.name || field.id),
+    ...(incoming.fields || []).map((field) => field.name || field.id),
+    "数据来源"
+  ])];
+  return {
+    dataset: {
+      meta: {
+        ...(existing.meta || {}),
+        status: "ok",
+        syncedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+        message: `${cleanSource}：新增 ${summary.inserted}，更新 ${summary.updated}，未变化 ${summary.unchanged}`
+      },
+      fields: fieldNames.map((name) => ({ id: name, name, type: existing.fields.find((field) => (field.name || field.id) === name)?.type || "text" })),
+      records
+    },
+    summary
+  };
+}
 
 export function parseCsv(text: string): Array<Record<string, FieldValue>> {
   const rows: string[][] = [];

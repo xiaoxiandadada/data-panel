@@ -1,4 +1,5 @@
 import type { AppUser, Dataset, FieldValue } from "./types.js";
+import { hasAdminRole, hasUserRole } from "./user-roles.js";
 
 export interface AdminFieldView {
   id: string;
@@ -47,11 +48,11 @@ function ownerNames(owner: string): string[] {
 }
 
 export function isSuperAdmin(user: AppUser | null | undefined): boolean {
-  return user?.role === "super_admin";
+  return hasUserRole(user, "super_admin");
 }
 
 export function fieldViewsForUser(user: AppUser | null | undefined): AdminFieldView[] {
-  if (!user || user.role === "requester") return [];
+  if (!user || !hasAdminRole(user)) return [];
   if (isSuperAdmin(user)) return adminFieldViews;
   const name = normalize(user.name);
   return adminFieldViews.filter((view) => ownerNames(view.owner).includes(name));

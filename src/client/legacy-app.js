@@ -42,7 +42,7 @@ const FILTER_FIELDS = [
   "承接方责任人"
 ];
 const CORE_COLUMNS = ["项目名称", "获取状态", "隶属部门", "项目对接人", "解决方案负责人", "Sprint"];
-const REQUESTER_COLUMNS = ["项目名称", "获取状态", "隶属部门", "需求负责人", "需求人", "关注人", "项目对接人", "解决方案负责人", "需求提出时间", "期望交付日期", "Sprint"];
+const REQUESTER_COLUMNS = ["项目名称", "获取状态", "隶属部门", "需求负责人", "需求人", "关注人", "PM", "项目对接人", "解决方案负责人", "需求提出时间", "期望交付日期", "Sprint", "满意度", "满意度评价来源"];
 const OWNER_FIELD_GROUPS = [
   {
     id: "gu-yuying",
@@ -92,6 +92,8 @@ const DEMAND_FORM_FIELDS = [
   { name: "需求负责人", type: "text", required: true, defaultCurrentUser: true, placeholder: "负责维护该需求和添加关注人" },
   { name: "需求人", type: "text", required: true, defaultCurrentUser: true, placeholder: "可填写多人，用顿号分隔，例如：张三、李四" },
   { name: "关注人", type: "text", placeholder: "可选，后续需求负责人也可以维护" },
+  { name: "是否设置PM", type: "select", required: true, options: ["否", "是"] },
+  { name: "PM", type: "text", placeholder: "从飞书通讯录选择本需求的 PM", pmDependent: true },
   { name: "需求类型", type: "select", multiple: true, options: ["采集", "自动采集", "采购", "标注", "其他", "245"] },
   { name: "学科", type: "select", multiple: true, options: ["数学", "物理", "化学", "材料", "生命科学", "地球科学", "全部学科", "通用数据", "医学", "其他"] },
   { name: "获取渠道", type: "select", options: ["外部采集", "内部采集", "自动采集", "外部采购", "外部标注"] },
@@ -145,7 +147,7 @@ const SEARCH_FIELDS = [
   "2026需求编码"
 ];
 const LONG_FIELDS = new Set(["项目备注", "需求异常原因", "阻塞项", "验收备注", "交付异常原因", "入库地址", "数据平台地址"]);
-const PERSON_FIELDS = new Set(["需求负责人", "需求人", "关注人", "部门负责人", "项目对接人", "解决方案负责人", "承接方责任人"]);
+const PERSON_FIELDS = new Set(["需求负责人", "需求人", "关注人", "PM", "部门负责人", "项目对接人", "解决方案负责人", "承接方责任人"]);
 const MULTI_PERSON_FIELDS = new Set(["需求人", "关注人"]);
 const LINK_FIELDS = new Set(["需求文档", "入库地址", "数据平台地址", "交付路径"]);
 const STATUS_COLORS = {
@@ -236,7 +238,11 @@ let state = {
   suggestionRequestId: 0,
   personPickerTarget: null,
   personSearchRequestId: 0,
-  personPickerTimer: 0
+  personPickerTimer: 0,
+  fieldPreferences: { hiddenFields: [], fieldOrder: [] },
+  adminUsers: [],
+  importPreview: null,
+  importFile: null
 };
 
 const el = (id) => document.getElementById(id);
@@ -246,7 +252,22 @@ function isOAuthMode() {
 }
 
 function isSuperAdmin() {
-  return state.currentUser?.role === "super_admin";
+  return userRoles(state.currentUser).includes("super_admin");
+}
+
+function userRoles(user) {
+  return [...new Set(["requester", ...(user?.roles || []), user?.role].filter(Boolean))];
+}
+
+function hasAdminCapability(user = state.currentUser) {
+  return userRoles(user).some((role) => ["delivery_admin", "super_admin"].includes(role));
+}
+
+function visibleAdminColumns() {
+  const hidden = new Set(state.fieldPreferences.hiddenFields || []);
+  const configured = (state.fieldPreferences.fieldOrder || []).filter((field) => state.fields.some((item) => (item.name || item.id) === field));
+  const source = configured.length ? configured : TABLE_COLUMNS;
+  return [...new Set(source)].filter((field) => !hidden.has(field));
 }
 
 function ownerNames(owner) {
@@ -365,7 +386,7 @@ function renderRequesterNameOptions() {
   const list = el("requesterNameOptions");
   if (!list) return;
   const names = [...new Set([
-    ...state.mockUsers.filter((user) => user.role === "requester").map((user) => user.name),
+    ...state.mockUsers.map((user) => user.name),
     ...state.requesters
   ].filter(Boolean))];
   list.innerHTML = names.map((name) => `<option value="${escapeHtml(name)}"></option>`).join("");
@@ -723,27 +744,21 @@ async function loadPublicSearch(query, limit = 100) {
   return data.records || [];
 }
 
-async function loadRequesterRecords(name) {
-  if (!name) return [];
-  const data = await fetchJson(`/api/my-records?name=${encodeURIComponent(name)}&t=${Date.now()}`);
+async function loadRequesterRecords() {
+  if (!state.authRole || state.adminMode) return [];
+  const data = await fetchJson(`/api/my-records?t=${Date.now()}`);
   return data.records || [];
 }
 
 async function loadRequesterBootstrap() {
   if (state.adminMode) return;
-  const data = await fetchJson(`/api/requesters?t=${Date.now()}`);
-  state.requesters = data.requesters || [];
-  if (state.authRole === "requester" && state.requesterName) {
-    if (!state.requesters.includes(state.requesterName)) {
-      state.requesters = [...state.requesters, state.requesterName].sort((a, b) => a.localeCompare(b, "zh-CN"));
-    }
-    state.requesterRecords = await loadRequesterRecords(state.requesterName);
+  state.requesters = state.mockUsers.map((user) => user.name);
+  if (state.authRole === "requester" && state.currentUser) {
+    state.requesterName = state.currentUser.name;
+    state.requesterRecords = await loadRequesterRecords();
     return;
   }
-  if (!state.requesterName || !state.requesters.includes(state.requesterName)) {
-    state.requesterName = state.requesters[0] || "";
-  }
-  state.requesterRecords = await loadRequesterRecords(state.requesterName);
+  state.requesterRecords = [];
 }
 
 async function refreshVisitorSuggestions(query) {
@@ -807,7 +822,7 @@ function renderHeaderCell(column) {
 }
 
 function renderTable(records) {
-  const tableColumns = state.adminMode ? TABLE_COLUMNS : VISITOR_COLUMNS;
+  const tableColumns = state.adminMode ? visibleAdminColumns() : VISITOR_COLUMNS;
   el("recordSummary").textContent = `${records.length} 条记录`;
   if (!records.length) {
     el("records").innerHTML = `<div class="empty">没有符合条件的项目</div>`;
@@ -830,7 +845,7 @@ function renderTable(records) {
 function renderRow(record) {
   const status = cell(record, "获取状态");
   const group = statusGroup(status);
-  const tableColumns = state.adminMode ? TABLE_COLUMNS : VISITOR_COLUMNS;
+  const tableColumns = state.adminMode ? visibleAdminColumns() : VISITOR_COLUMNS;
   const cells = tableColumns.map((column) => {
     const value = cell(record, column);
     if (column === "获取状态" && state.adminMode) {
@@ -920,6 +935,13 @@ function renderFollowerEditor(record) {
 function renderRequesterView() {
   const section = el("requesterSection");
   section.classList.remove("hidden");
+  const heading = section.querySelector(".requester-hero h2");
+  const description = section.querySelector(".requester-hero > div > p:not(.eyebrow)");
+  const userLabel = section.querySelector(".current-user span");
+  if (heading) heading.textContent = "我的需求进展";
+  if (description) description.textContent = "仅展示本人提交、负责、关注或担任 PM 的需求，系统按获取状态转换为进度条。";
+  if (userLabel) userLabel.textContent = "当前用户";
+  el("requestSubmitButton").classList.remove("hidden");
   el("currentRequesterName").textContent = state.requesterName || "-";
 
   const records = state.requesterRecords;
@@ -944,12 +966,40 @@ function renderRequesterView() {
         `).join("")}
       </div>
       ${renderFollowerEditor(record)}
+      ${renderSatisfactionControl(record)}
     </article>
-  `).join("") : `<div class="empty">当前需求方暂无需求进展</div>`;
+  `).join("") : `<div class="empty">当前暂无与本人相关的需求</div>`;
+}
+
+function renderSatisfactionControl(record) {
+  const score = cell(record, "满意度");
+  if (score) {
+    return `<div class="satisfaction-result"><b>满意度</b><span>${escapeHtml(score)} / 5 · ${escapeHtml(cell(record, "满意度评价来源") || "需求方评价")}</span></div>`;
+  }
+  if (statusProgress(cell(record, "获取状态")) < 100) return "";
+  return `
+    <form class="satisfaction-form" data-satisfaction-record="${escapeHtml(record.record_id)}">
+      <label><span>交付满意度</span><select name="score" required><option value="">请选择</option><option value="5">5 分</option><option value="4">4 分</option><option value="3">3 分</option><option value="2">2 分</option><option value="1">1 分</option></select></label>
+      <label><span>评价说明</span><input name="comment" placeholder="可选" /></label>
+      <button class="button mini" type="submit">提交评价</button>
+    </form>`;
+}
+
+async function submitSatisfaction(recordId, score, comment) {
+  const result = await fetchJson(`/api/requests/${encodeURIComponent(recordId)}/satisfaction`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ score: Number(score), comment })
+  });
+  state.requesterRecords = result.data?.records || await loadRequesterRecords();
+  renderAll();
 }
 
 function columnsForOwnerGroup(group) {
-  return [...new Set([...CORE_COLUMNS, ...(group?.fields || [])])].filter((column) => state.fields.some((field) => (field.name || field.id) === column) || TABLE_COLUMNS.includes(column));
+  const hidden = new Set(state.fieldPreferences.hiddenFields || []);
+  return [...new Set([...CORE_COLUMNS, ...(group?.fields || [])])]
+    .filter((column) => !hidden.has(column))
+    .filter((column) => state.fields.some((field) => (field.name || field.id) === column) || TABLE_COLUMNS.includes(column));
 }
 
 function renderGenericTable(containerId, records, columns, editable = false) {
@@ -1015,7 +1065,7 @@ function renderOwnerView(records) {
     <div class="owner-description">${escapeHtml(group.description)}</div>
     ${group.fields.map((field) => `<span class="field-chip">${escapeHtml(field)}</span>`).join("")}
   `;
-  const columns = group.id === "super" ? TABLE_COLUMNS : columnsForOwnerGroup(group);
+  const columns = group.id === "super" ? visibleAdminColumns() : columnsForOwnerGroup(group);
   renderGenericTable("ownerRecords", records, columns, true);
 }
 
@@ -1038,12 +1088,14 @@ function renderAnalytics(records) {
   const solutionDays = averageDays(records, "需求提出时间", "需求澄清完成时间");
   const firstDeliveryDays = averageDays(records, "开始执行时间", "实际交付完成日期");
   const totalDeliveryDays = averageDays(records, "需求提出时间", "实际验收通过时间");
-  const satisfactionReady = records.filter((record) => statusProgress(cell(record, "获取状态")) >= 100).length;
+  const satisfactionScores = records.map((record) => Number(cell(record, "满意度"))).filter((value) => value >= 1 && value <= 5);
+  const satisfactionAverage = satisfactionScores.length ? (satisfactionScores.reduce((sum, value) => sum + value, 0) / satisfactionScores.length).toFixed(1) : "待统计";
+  const autoGood = records.filter((record) => cell(record, "满意度评价来源") === "系统自动").length;
   const cards = [
     ["方案处理耗时", solutionDays == null ? "待统计" : `${solutionDays} 天`, "需求提出到需求澄清完成"],
     ["首次全量交付", firstDeliveryDays == null ? "待统计" : `${firstDeliveryDays} 天`, "开始执行到实际交付完成"],
     ["整体交付周期", totalDeliveryDays == null ? "待统计" : `${totalDeliveryDays} 天`, "需求提出到验收通过"],
-    ["满意度待评价", satisfactionReady, "完成后由需求方评价交付结果"]
+    ["平均满意度", satisfactionAverage === "待统计" ? satisfactionAverage : `${satisfactionAverage} / 5`, `已评价 ${satisfactionScores.length} 条，其中系统默认 ${autoGood} 条`]
   ];
   el("analyticsCards").innerHTML = cards.map(([title, value, hint]) => `
     <article class="analytics-card">
@@ -1072,6 +1124,12 @@ function renderWorkspace() {
   el("analyticsSection").classList.toggle("hidden", !state.adminMode || !superAdmin || state.activeView !== "analytics");
   el("adminTabs").classList.toggle("hidden", !state.adminMode || !superAdmin);
   el("importButton").classList.toggle("hidden", !superAdmin);
+  el("addRecordButton").classList.toggle("hidden", !superAdmin);
+  el("fieldSettingsButton").classList.toggle("hidden", !state.adminMode);
+  el("userManagementButton").classList.toggle("hidden", !state.adminMode || !superAdmin);
+  el("downloadMyDataButton").classList.toggle("hidden", state.authRole !== "requester");
+  el("workspaceModeButton").classList.toggle("hidden", !hasAdminCapability());
+  el("workspaceModeButton").textContent = state.adminMode ? "切换到我的需求" : "切换到管理员视图";
   el("filterGrid").classList.add("hidden");
   el("activeFilters").classList.add("hidden");
 
@@ -1116,58 +1174,154 @@ function renderAll() {
 }
 
 async function loadData() {
-  const data = await fetchJson(`${DATA_URL}?t=${Date.now()}`);
+  const mode = state.adminMode ? "admin" : "mine";
+  const data = await fetchJson(`${DATA_URL}?mode=${mode}&t=${Date.now()}`);
   state.fields = data.fields || [];
   state.records = data.records || [];
   state.meta = data.meta || {};
+  if (state.adminMode) await loadFieldPreferences();
   await loadRequesterBootstrap();
   renderAll();
 }
 
-function parseCsv(text) {
-  const rows = [];
-  let row = [];
-  let cellValue = "";
-  let quoted = false;
-  for (let index = 0; index < text.length; index += 1) {
-    const char = text[index];
-    const next = text[index + 1];
-    if (quoted) {
-      if (char === '"' && next === '"') {
-        cellValue += '"';
-        index += 1;
-      } else if (char === '"') quoted = false;
-      else cellValue += char;
-      continue;
-    }
-    if (char === '"') quoted = true;
-    else if (char === ",") {
-      row.push(cellValue);
-      cellValue = "";
-    } else if (char === "\n") {
-      row.push(cellValue);
-      rows.push(row);
-      row = [];
-      cellValue = "";
-    } else if (char !== "\r") cellValue += char;
-  }
-  row.push(cellValue);
-  if (row.some((value) => value.trim() !== "")) rows.push(row);
-  const headers = rows.shift()?.map((header, index) => header.replace(/^\uFEFF/, "").trim() || `字段${index + 1}`) || [];
-  return rows.map((values) => Object.fromEntries(headers.map((header, index) => [header, values[index] ?? ""])));
+async function loadFieldPreferences() {
+  const result = await fetchJson("/api/preferences/fields");
+  state.fieldPreferences = result.preferences || { hiddenFields: [], fieldOrder: [] };
 }
 
-async function importFile(file) {
-  const text = await file.text();
-  const payload = file.name.toLowerCase().endsWith(".csv") ? parseCsv(text) : JSON.parse(text);
-  const response = await fetch("/api/import", {
+async function openUserManagement() {
+  const result = await fetchJson("/api/admin/users");
+  state.adminUsers = result.users || [];
+  renderUserManagement();
+  el("userManagementDialog").showModal();
+}
+
+function renderUserManagement() {
+  el("userManagementList").innerHTML = state.adminUsers.length ? state.adminUsers.map((user) => {
+    const roles = userRoles(user);
+    const superAdmin = roles.includes("super_admin");
+    const deliveryAdmin = roles.includes("delivery_admin");
+    return `
+      <article class="user-management-row">
+        <div>
+          <strong>${escapeHtml(user.name || "未命名用户")}</strong>
+          <span>${escapeHtml([user.department, user.email, user.openId].filter(Boolean).join(" · "))}</span>
+        </div>
+        <div class="user-role-controls">
+          <span class="role-badge">需求方</span>
+          ${superAdmin ? `<span class="role-badge super">超级管理员</span>` : `
+            <label class="role-toggle">
+              <input type="checkbox" data-delivery-role="${escapeAttr(user.openId)}" ${deliveryAdmin ? "checked" : ""} />
+              <span>交付管理员</span>
+            </label>
+            <button class="button mini" type="button" data-save-user-role="${escapeAttr(user.openId)}">保存</button>
+          `}
+        </div>
+      </article>`;
+  }).join("") : `<div class="empty compact">暂无用户；成员首次通过飞书登录后会出现在这里。</div>`;
+}
+
+async function saveUserRoles(openId) {
+  const checkbox = el("userManagementList").querySelector(`input[data-delivery-role="${CSS.escape(openId)}"]`);
+  const roles = checkbox?.checked ? ["requester", "delivery_admin"] : ["requester"];
+  const result = await fetchJson(`/api/admin/users/${encodeURIComponent(openId)}/role`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ roles })
+  });
+  state.adminUsers = state.adminUsers.map((user) => user.openId === openId ? result.user : user);
+  renderUserManagement();
+}
+
+function fieldPreferenceOrder() {
+  const available = state.fields.map((field) => field.name || field.id);
+  const configured = (state.fieldPreferences.fieldOrder || []).filter((field) => available.includes(field));
+  return [...configured, ...available.filter((field) => !configured.includes(field))];
+}
+
+function renderFieldSettings() {
+  const hidden = new Set(state.fieldPreferences.hiddenFields || []);
+  el("fieldSettingsList").innerHTML = fieldPreferenceOrder().map((field, index, all) => `
+    <div class="field-setting-row" data-field-setting="${escapeHtml(field)}">
+      <label><input type="checkbox" ${hidden.has(field) ? "" : "checked"} /><span>${escapeHtml(field)}</span></label>
+      <div class="field-order-actions">
+        <button class="icon-button mini-icon" type="button" data-move-field="-1" ${index === 0 ? "disabled" : ""} title="上移">↑</button>
+        <button class="icon-button mini-icon" type="button" data-move-field="1" ${index === all.length - 1 ? "disabled" : ""} title="下移">↓</button>
+      </div>
+    </div>`).join("");
+}
+
+function openFieldSettings() {
+  renderFieldSettings();
+  el("fieldSettingsDialog").showModal();
+}
+
+async function saveFieldSettings() {
+  const rows = [...el("fieldSettingsList").querySelectorAll("[data-field-setting]")];
+  const fieldOrder = rows.map((row) => row.dataset.fieldSetting);
+  const hiddenFields = rows.filter((row) => !row.querySelector("input").checked).map((row) => row.dataset.fieldSetting);
+  const result = await fetchJson("/api/preferences/fields", {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ hiddenFields, fieldOrder })
+  });
+  state.fieldPreferences = result.preferences;
+  el("fieldSettingsDialog").close();
+  renderWorkspace();
+}
+
+function openImportDialog() {
+  state.importPreview = null;
+  state.importFile = null;
+  el("excelImportForm").reset();
+  el("importPreview").innerHTML = `<div class="empty compact">选择 Excel 文件后先进行预检</div>`;
+  el("confirmExcelImport").disabled = true;
+  el("excelImportDialog").showModal();
+}
+
+async function uploadExcel(file, source, dryRun) {
+  const response = await fetch(`/api/import?source=${encodeURIComponent(source)}&dryRun=${dryRun ? "1" : "0"}`, {
     method: "POST",
     credentials: "same-origin",
-    headers: { "content-type": "application/json", "x-admin-token": state.adminToken },
-    body: JSON.stringify(payload)
+    headers: {
+      "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "x-file-name": encodeURIComponent(file.name),
+      ...(state.adminToken ? { "x-admin-token": state.adminToken } : {})
+    },
+    body: file
   });
-  const result = await response.json();
-  if (!response.ok || result.ok === false) throw new Error(result.message || "导入失败");
+  const result = await response.json().catch(() => null);
+  if (!response.ok || result?.ok === false) throw new Error(result?.message || "Excel 导入失败");
+  return result;
+}
+
+function renderImportPreview(result) {
+  const summary = result.summary || {};
+  el("importPreview").innerHTML = `
+    <div class="import-summary-grid">
+      <span><b>${summary.total || 0}</b>读取</span>
+      <span><b>${summary.inserted || 0}</b>新增</span>
+      <span><b>${summary.updated || 0}</b>更新</span>
+      <span><b>${summary.unchanged || 0}</b>未变化</span>
+      <span><b>${summary.conflicts || 0}</b>重复</span>
+    </div>
+    <p>识别字段：${escapeHtml((result.fields || []).map((field) => field.name || field.id).slice(0, 12).join("、"))}${(result.fields || []).length > 12 ? "…" : ""}</p>`;
+}
+
+async function previewExcelImport() {
+  const file = el("excelImportFile").files?.[0];
+  if (!file) throw new Error("请选择 .xlsx 文件");
+  if (!file.name.toLowerCase().endsWith(".xlsx")) throw new Error("仅支持 .xlsx Excel 文件");
+  state.importFile = file;
+  const result = await uploadExcel(file, el("excelImportSource").value, true);
+  state.importPreview = result;
+  renderImportPreview(result);
+  el("confirmExcelImport").disabled = false;
+}
+
+async function confirmExcelImport() {
+  if (!state.importFile || !state.importPreview) throw new Error("请先完成导入预检");
+  const result = await uploadExcel(state.importFile, el("excelImportSource").value, false);
   state.fields = result.data.fields || [];
   state.records = result.data.records || [];
   state.meta = result.data.meta || {};
@@ -1175,12 +1329,14 @@ async function importFile(file) {
   state.draft = "";
   state.filters = {};
   el("projectSearchInput").value = "";
+  el("excelImportDialog").close();
   renderAll();
 }
 
 function updateModeUI() {
   document.body.classList.toggle("login-mode", !state.authRole);
   document.body.classList.toggle("requester-mode", state.authRole === "requester");
+  document.body.classList.remove("pm-mode");
   document.body.classList.toggle("admin-mode", state.adminMode);
   el("modeButton").textContent = state.authRole ? "退出登录" : "管理员登录";
   el("modeButton").classList.toggle("primary", state.adminMode);
@@ -1205,13 +1361,14 @@ function updateLoginGate() {
   if (requesterLoginHint) requesterLoginHint.textContent = oauthMode ? "使用飞书账号验证身份" : "查看我的需求进展";
   if (adminLoginLabel) adminLoginLabel.textContent = oauthMode ? "管理员登录" : "管理员登录";
   if (adminLoginHint) adminLoginHint.textContent = oauthMode ? "仅已配置管理员可进入" : "维护台账与负责人视图";
+  el("requesterRegisterButton").classList.toggle("hidden", oauthMode);
 
   if (oauthMode && el("requesterAuthDialog").open) {
     el("requesterAuthDialog").close();
   }
 }
 
-function applyUser(user) {
+function applyUser(user, preferredMode = "") {
   state.currentUser = user || null;
   if (!user) {
     state.authRole = "";
@@ -1219,24 +1376,25 @@ function applyUser(user) {
     state.requesterName = "";
     return;
   }
-  const adminRoles = ["delivery_admin", "purchase_admin", "super_admin"];
-  state.authRole = adminRoles.includes(user.role) ? "admin" : "requester";
+  const useAdminMode = hasAdminCapability(user) && preferredMode !== "requester";
+  state.authRole = useAdminMode ? "admin" : "requester";
   state.adminMode = state.authRole === "admin";
-  state.requesterName = state.authRole === "requester" ? user.name : "";
-  state.activeView = state.authRole === "admin" ? (user.role === "super_admin" ? "ledger" : "owners") : "requester";
+  state.requesterName = user.name;
+  state.activeView = state.authRole === "admin" ? (user.role === "super_admin" ? "ledger" : "owners") : state.authRole;
 }
 
 async function loadSession() {
   const session = await fetchJson(`/api/auth/me?t=${Date.now()}`);
   state.mockUsers = session.mockUsers || [];
   state.larkOAuthEnabled = Boolean(session.larkOAuthEnabled);
-  if (session.authenticated) {
-    applyUser(session.user);
-  }
   const params = new URLSearchParams(window.location.search);
+  if (session.authenticated) {
+    applyUser(session.user, params.get("mode") || "");
+  }
   if (params.get("auth_error") === "admin_only") {
     state.authError = "该飞书账号未被配置为管理员，请从需求方入口登录。";
-    window.history.replaceState({}, "", window.location.pathname);
+    params.delete("auth_error");
+    window.history.replaceState({}, "", `${window.location.pathname}${params.toString() ? `?${params}` : ""}`);
   }
 }
 
@@ -1261,7 +1419,7 @@ async function logout() {
 
 function openRequesterAuthDialog(mode) {
   if (isOAuthMode()) {
-    window.location.href = `/api/auth/lark/login?next=${encodeURIComponent("/")}`;
+    window.location.href = `/api/auth/lark/login?next=${encodeURIComponent("/?mode=requester")}`;
     return;
   }
   state.requesterAuthMode = mode;
@@ -1285,7 +1443,7 @@ function closeRequesterAuthDialog() {
 
 function openAdminLogin() {
   if (isOAuthMode()) {
-    window.location.href = `/api/auth/lark/login?adminOnly=1&next=${encodeURIComponent("/")}`;
+    window.location.href = `/api/auth/lark/login?adminOnly=1&next=${encodeURIComponent("/?mode=admin")}`;
     return;
   }
   el("adminPassword").value = "";
@@ -1305,13 +1463,13 @@ async function enterRequester(name) {
       register: state.requesterAuthMode === "register"
     })
   });
-  applyUser(result.user);
+  applyUser(result.user, "requester");
   state.requesterName = result.user?.name || cleanName;
   if (!state.requesters.includes(cleanName)) {
     state.requesters = [...state.requesters, cleanName].sort((a, b) => a.localeCompare(b, "zh-CN"));
   }
   state.adminToken = "";
-  state.requesterRecords = await loadRequesterRecords(state.requesterName);
+  state.requesterRecords = await loadRequesterRecords();
   renderWorkspace();
 }
 
@@ -1344,12 +1502,25 @@ function renderDemandControl(field) {
 
 function renderRequestForm() {
   el("requestFormFields").innerHTML = DEMAND_FORM_FIELDS.map((field) => `
-    <label class="${field.type === "textarea" ? "span-2" : ""}">
+    <label class="${field.type === "textarea" ? "span-2" : ""} ${field.pmDependent ? "pm-dependent hidden" : ""}">
       <span>${escapeHtml(field.name)}${field.required ? " *" : ""}</span>
       ${renderDemandControl(field)}
       ${field.description ? `<small>${escapeHtml(field.description)}</small>` : ""}
     </label>
   `).join("");
+  el("requestFormFields").querySelector('[name="是否设置PM"]')?.addEventListener("change", updatePmFieldVisibility);
+  updatePmFieldVisibility();
+}
+
+function updatePmFieldVisibility() {
+  const enabled = el("requestFormFields").querySelector('[name="是否设置PM"]')?.value === "是";
+  const wrapper = el("requestFormFields").querySelector(".pm-dependent");
+  const input = wrapper?.querySelector('[name="PM"]');
+  wrapper?.classList.toggle("hidden", !enabled);
+  if (input) {
+    input.required = enabled;
+    if (!enabled) input.value = "";
+  }
 }
 
 function openRequestDialog() {
@@ -1399,10 +1570,11 @@ function openRecordDialog(record = null) {
   if (!state.adminMode) return;
   if (!record && !isSuperAdmin()) return;
   state.editingRecordId = record?.record_id || null;
-  el("recordDialogTitle").textContent = record ? "编辑项目数据" : "导入项目数据";
+  el("recordDialogTitle").textContent = record ? "编辑项目数据" : "添加项目数据";
+  const hidden = new Set(state.fieldPreferences.hiddenFields || []);
   const editableFields = isSuperAdmin()
-    ? state.fields
-    : state.fields.filter((field) => canEditOwnerField(field.name || field.id));
+    ? state.fields.filter((field) => !hidden.has(field.name || field.id))
+    : state.fields.filter((field) => canEditOwnerField(field.name || field.id) && !hidden.has(field.name || field.id));
   el("recordFormFields").innerHTML = editableFields.map((field, index) => {
     const name = field.name || field.id;
     const value = record ? cell(record, name) : "";
@@ -1432,11 +1604,11 @@ async function submitDemand(fields) {
     method: "POST",
     credentials: "same-origin",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ requesterName: state.requesterName, fields })
+    body: JSON.stringify({ fields })
   });
   const result = await response.json();
   if (!response.ok || result.ok === false) throw new Error(result.message || "提交失败");
-  state.requesterRecords = result.data?.records || await loadRequesterRecords(state.requesterName);
+  state.requesterRecords = result.data?.records || await loadRequesterRecords();
   state.meta = result.data?.meta || state.meta;
   renderAll();
 }
@@ -1446,11 +1618,11 @@ async function saveFollowers(recordId, followers) {
     method: "PATCH",
     credentials: "same-origin",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ requesterName: state.requesterName, followers })
+    body: JSON.stringify({ followers })
   });
   const result = await response.json();
   if (!response.ok || result.ok === false) throw new Error(result.message || "保存关注人失败");
-  state.requesterRecords = result.data?.records || await loadRequesterRecords(state.requesterName);
+  state.requesterRecords = result.data?.records || await loadRequesterRecords();
   state.meta = result.data?.meta || state.meta;
   renderAll();
 }
@@ -1535,7 +1707,25 @@ async function updateRecord(recordId, patch) {
 }
 
 el("refreshButton").addEventListener("click", loadData);
-el("importButton").addEventListener("click", () => openRecordDialog());
+el("importButton").addEventListener("click", openImportDialog);
+el("addRecordButton").addEventListener("click", () => openRecordDialog());
+el("fieldSettingsButton").addEventListener("click", openFieldSettings);
+el("userManagementButton").addEventListener("click", () => openUserManagement().catch((error) => alert(error.message)));
+el("downloadMyDataButton").addEventListener("click", () => {
+  window.location.href = "/api/my-records/export";
+});
+el("workspaceModeButton").addEventListener("click", async () => {
+  const nextMode = state.adminMode ? "requester" : "admin";
+  applyUser(state.currentUser, nextMode);
+  window.history.replaceState({}, "", `/?mode=${nextMode}`);
+  await loadData();
+});
+el("closeUserManagementDialog").addEventListener("click", () => el("userManagementDialog").close());
+el("cancelUserManagement").addEventListener("click", () => el("userManagementDialog").close());
+el("userManagementList").addEventListener("click", (event) => {
+  const openId = event.target.closest("button[data-save-user-role]")?.dataset.saveUserRole;
+  if (openId) saveUserRoles(openId).catch((error) => alert(error.message));
+});
 el("adminTabs").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-view]");
   if (!button) return;
@@ -1550,6 +1740,7 @@ el("ownerTabs").addEventListener("click", (event) => {
   renderWorkspace();
 });
 el("requesterLoginButton").addEventListener("click", () => openRequesterAuthDialog("login"));
+el("requesterRegisterButton").addEventListener("click", () => openRequesterAuthDialog("register"));
 el("adminLoginButton").addEventListener("click", openAdminLogin);
 el("requestSubmitButton").addEventListener("click", () => {
   openRequestDialog();
@@ -1567,6 +1758,17 @@ el("requesterCards").addEventListener("click", async (event) => {
   const input = el("requesterCards").querySelector(`input[data-follower-input="${CSS.escape(saveId)}"]`);
   try {
     await saveFollowers(saveId, input?.value || "");
+  } catch (error) {
+    alert(error.message);
+  }
+});
+el("requesterCards").addEventListener("submit", async (event) => {
+  const form = event.target.closest("form[data-satisfaction-record]");
+  if (!form) return;
+  event.preventDefault();
+  const data = new FormData(form);
+  try {
+    await submitSatisfaction(form.dataset.satisfactionRecord, data.get("score"), data.get("comment"));
   } catch (error) {
     alert(error.message);
   }
@@ -1689,6 +1891,30 @@ el("recordForm").addEventListener("submit", async (event) => {
     alert(error.message);
   }
 });
+el("closeFieldSettingsDialog").addEventListener("click", () => el("fieldSettingsDialog").close());
+el("cancelFieldSettings").addEventListener("click", () => el("fieldSettingsDialog").close());
+el("saveFieldSettings").addEventListener("click", () => saveFieldSettings().catch((error) => alert(error.message)));
+el("fieldSettingsList").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-move-field]");
+  if (!button) return;
+  const row = button.closest("[data-field-setting]");
+  const sibling = Number(button.dataset.moveField) < 0 ? row.previousElementSibling : row.nextElementSibling;
+  if (!sibling) return;
+  if (Number(button.dataset.moveField) < 0) row.parentElement.insertBefore(row, sibling);
+  else row.parentElement.insertBefore(sibling, row);
+  const hiddenFields = [...el("fieldSettingsList").querySelectorAll("[data-field-setting]")]
+    .filter((item) => !item.querySelector("input").checked)
+    .map((item) => item.dataset.fieldSetting);
+  state.fieldPreferences = {
+    hiddenFields,
+    fieldOrder: [...el("fieldSettingsList").querySelectorAll("[data-field-setting]")].map((item) => item.dataset.fieldSetting)
+  };
+  renderFieldSettings();
+});
+el("closeExcelImportDialog").addEventListener("click", () => el("excelImportDialog").close());
+el("cancelExcelImport").addEventListener("click", () => el("excelImportDialog").close());
+el("previewExcelImport").addEventListener("click", () => previewExcelImport().catch((error) => alert(error.message)));
+el("confirmExcelImport").addEventListener("click", () => confirmExcelImport().catch((error) => alert(error.message)));
 el("closeRequesterAuthDialog").addEventListener("click", closeRequesterAuthDialog);
 el("cancelRequesterAuthForm").addEventListener("click", closeRequesterAuthDialog);
 el("requesterAuthForm").addEventListener("submit", async (event) => {

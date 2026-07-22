@@ -39,7 +39,7 @@ export interface LedgerLog {
   createdAt: string;
 }
 
-export type UserRole = "requester" | "delivery_admin" | "purchase_admin" | "super_admin";
+export type UserRole = "requester" | "delivery_admin" | "super_admin";
 
 export interface AppUser {
   openId: string;
@@ -48,4 +48,45 @@ export interface AppUser {
   avatar?: string;
   department: string;
   role: UserRole;
+  roles?: UserRole[];
+}
+
+export interface UserFieldPreferences {
+  openId: string;
+  hiddenFields: string[];
+  fieldOrder: string[];
+  updatedAt: string;
+}
+
+export interface ImportBatch {
+  id: string;
+  source: string;
+  fileName: string;
+  mode: "excel" | "lark" | "api";
+  total: number;
+  inserted: number;
+  updated: number;
+  unchanged: number;
+  conflicts: number;
+  actor: string;
+  createdAt: string;
+}
+
+export interface NotificationLog {
+  id: string;
+  eventName: string;
+  recordId: string;
+  status: "sent" | "partial" | "skipped" | "failed";
+  recipients: string[];
+  attempts: number;
+  error: string;
+  createdAt: string;
+}
+
+export interface QueueEvent {
+  id: string;
+  eventName: string;
+  payload: Record<string, unknown>;
+  attempts: number;
+  createdAt: string;
 }
