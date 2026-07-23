@@ -13,7 +13,7 @@ export interface LarkSyncResult {
 }
 
 export interface LarkSyncSource {
-  key: "request" | "data-team" | "ledger";
+  key: "ledger" | "project-245" | "gaofeng";
   source: string;
   tableId: string;
   viewId: string;
@@ -24,7 +24,10 @@ export interface LarkSyncSource {
 @Injectable()
 export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDestroy {
   private timer: NodeJS.Timeout | null = null;
+  private eventTimer: NodeJS.Timeout | null = null;
   private syncing = false;
+  private syncQueue: Promise<void> = Promise.resolve();
+  private readonly pendingEventSources = new Map<LarkSyncSource["key"], string>();
   private resolvedAppToken = "";
   private lastSyncedAt = "";
   private lastError = "";
@@ -47,11 +50,12 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
 
   onModuleDestroy() {
     if (this.timer) clearInterval(this.timer);
+    if (this.eventTimer) clearTimeout(this.eventTimer);
   }
 
   isConfigured(): boolean {
     return Boolean(
-      (process.env.LARK_BASE_TOKEN || process.env.LARK_WIKI_NODE_TOKEN)
+      (process.env.LARK_BASE_TOKEN || this.wikiNodeToken())
       && this.sourceConfigurations().some((source) => source.configured)
       && this.lark.isBotConfigured()
     );
@@ -61,22 +65,29 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
     return {
       configured: this.isConfigured(),
       syncing: this.syncing,
+      eventPushConfigured: Boolean(String(process.env.LARK_BASE_WEBHOOK_SECRET || "").trim()),
+      pendingEventCount: this.pendingEventSources.size,
       lastSyncedAt: this.lastSyncedAt,
       lastError: this.lastError
     };
   }
 
   sourceConfigurations(): LarkSyncSource[] {
-    const baseUrl = String(process.env.LARK_BASE_WEB_URL || "").trim();
+    const baseUrl = String(
+      process.env.LARK_BASE_WEB_URL
+      || "https://aicarrier.feishu.cn/wiki/ZqC3whTTXiU2rUkLdRycTtmhnYE"
+    ).trim();
     const source = (
       key: LarkSyncSource["key"],
       name: string,
       tableIdEnv: string,
       viewIdEnv: string,
-      urlEnv: string
+      urlEnv: string,
+      defaultTableId: string,
+      defaultViewId: string
     ): LarkSyncSource => {
-      const tableId = String(process.env[tableIdEnv] || "").trim();
-      const viewId = String(process.env[viewIdEnv] || "").trim();
+      const tableId = String(process.env[tableIdEnv] || defaultTableId).trim();
+      const viewId = String(process.env[viewIdEnv] || defaultViewId).trim();
       const configuredUrl = String(process.env[urlEnv] || "").trim();
       return {
         key,
@@ -87,21 +98,79 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
         configured: Boolean(tableId)
       };
     };
-    // Requests land first, enrichment follows, and the main ledger remains authoritative.
     return [
-      source("request", "提需求表", "LARK_REQUEST_TABLE_ID", "LARK_REQUEST_VIEW_ID", "LARK_REQUEST_URL"),
-      source("data-team", "数据团队总表", "LARK_DATA_TEAM_TABLE_ID", "LARK_DATA_TEAM_VIEW_ID", "LARK_DATA_TEAM_URL"),
-      source("ledger", "总台账", "LARK_LEDGER_TABLE_ID", "LARK_LEDGER_VIEW_ID", "LARK_LEDGER_URL")
+      source(
+        "ledger",
+        "总台账",
+        "LARK_LEDGER_TABLE_ID",
+        "LARK_LEDGER_VIEW_ID",
+        "LARK_LEDGER_URL",
+        "tbl7FrAYMpseNuPA",
+        "vewkBG8gpp"
+      ),
+      source(
+        "project-245",
+        "245",
+        "LARK_245_TABLE_ID",
+        "LARK_245_VIEW_ID",
+        "LARK_245_URL",
+        "tbl6dWpodWYuWNq7",
+        "vew41dhWuZ"
+      ),
+      source(
+        "gaofeng",
+        "高峰加入",
+        "LARK_GAOFENG_TABLE_ID",
+        "LARK_GAOFENG_VIEW_ID",
+        "LARK_GAOFENG_URL",
+        "tbl8iFcCizgi0YrU",
+        "vewkBG8gpp"
+      )
     ];
   }
 
   async syncAll(actor = "系统"): Promise<LarkSyncResult[]> {
     if (!this.isConfigured()) throw new Error("飞书 Base 自动同步配置不完整");
-    if (this.syncing) return [];
+    return this.enqueueSync(this.sourceConfigurations().filter((item) => item.configured), actor);
+  }
+
+  scheduleTableSync(tableId: string, actor = "飞书实时推送"): LarkSyncSource | null {
+    const source = this.sourceConfigurations().find((item) => item.configured && item.tableId === tableId);
+    if (!source) return null;
+    this.pendingEventSources.set(source.key, actor);
+    if (!this.eventTimer) {
+      this.eventTimer = setTimeout(() => {
+        this.eventTimer = null;
+        void this.flushEventSources();
+      }, 300);
+      this.eventTimer.unref();
+    }
+    return source;
+  }
+
+  private enqueueSync(sources: LarkSyncSource[], actor: string): Promise<LarkSyncResult[]> {
+    let resolveTask!: (results: LarkSyncResult[]) => void;
+    let rejectTask!: (error: unknown) => void;
+    const task = new Promise<LarkSyncResult[]>((resolve, reject) => {
+      resolveTask = resolve;
+      rejectTask = reject;
+    });
+    this.syncQueue = this.syncQueue
+      .then(async () => {
+        try {
+          resolveTask(await this.performSync(sources, actor));
+        } catch (error) {
+          rejectTask(error);
+        }
+      })
+      .catch(() => undefined);
+    return task;
+  }
+
+  private async performSync(sources: LarkSyncSource[], actor: string): Promise<LarkSyncResult[]> {
     this.syncing = true;
     try {
       const appToken = await this.baseAppToken();
-      const sources = this.sourceConfigurations().filter((item) => item.configured);
       const results: LarkSyncResult[] = [];
       for (const source of sources) {
         const incoming = await this.lark.listBaseDataset(appToken, source.tableId, source.viewId);
@@ -132,11 +201,35 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
     }
   }
 
+  private async flushEventSources(): Promise<void> {
+    const pending = new Map(this.pendingEventSources);
+    this.pendingEventSources.clear();
+    const sources = this.sourceConfigurations().filter((source) => pending.has(source.key));
+    if (!sources.length) return;
+    const actor = [...pending.values()].at(-1) || "飞书实时推送";
+    try {
+      await this.enqueueSync(sources, actor);
+    } catch (error) {
+      console.warn(`Lark Base event sync failed: ${(error as Error).message}`);
+    }
+    if (this.pendingEventSources.size && !this.eventTimer) {
+      this.eventTimer = setTimeout(() => {
+        this.eventTimer = null;
+        void this.flushEventSources();
+      }, 300);
+      this.eventTimer.unref();
+    }
+  }
+
   private async baseAppToken(): Promise<string> {
     if (this.resolvedAppToken) return this.resolvedAppToken;
     const configured = String(process.env.LARK_BASE_TOKEN || "").trim();
-    this.resolvedAppToken = configured || await this.lark.resolveWikiNodeObjectToken(String(process.env.LARK_WIKI_NODE_TOKEN || ""));
+    this.resolvedAppToken = configured || await this.lark.resolveWikiNodeObjectToken(this.wikiNodeToken());
     return this.resolvedAppToken;
+  }
+
+  private wikiNodeToken(): string {
+    return String(process.env.LARK_WIKI_NODE_TOKEN || "ZqC3whTTXiU2rUkLdRycTtmhnYE").trim();
   }
 
   private tableUrl(baseUrl: string, tableId: string, viewId: string): string {

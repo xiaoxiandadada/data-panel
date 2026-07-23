@@ -11,6 +11,7 @@
     "check": "tsc -p tsconfig.server.json --noEmit && vite build --mode check",
     "test": "npm run build && node --test tests/*.test.mjs",
     "sync": "node scripts/sync-feishu.mjs",
+    "setup:lark-sync": "node scripts/setup-lark-sync-workflows.mjs",
     "import:data": "node scripts/import-local-data.mjs"
   },
   "dependencies": {

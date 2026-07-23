@@ -134,33 +134,33 @@ test("super administrator appointment updates roles and writes an audit log", as
   assert.equal(logs[0].record_id, "user:ou_member");
 });
 
-test("three Feishu tables expose stable online links and sync in authority order", () => {
+test("three Feishu business tables expose stable online links", () => {
   const keys = [
     "LARK_BASE_WEB_URL",
-    "LARK_REQUEST_TABLE_ID",
-    "LARK_REQUEST_VIEW_ID",
-    "LARK_DATA_TEAM_TABLE_ID",
-    "LARK_DATA_TEAM_VIEW_ID",
     "LARK_LEDGER_TABLE_ID",
-    "LARK_LEDGER_VIEW_ID"
+    "LARK_LEDGER_VIEW_ID",
+    "LARK_245_TABLE_ID",
+    "LARK_245_VIEW_ID",
+    "LARK_GAOFENG_TABLE_ID",
+    "LARK_GAOFENG_VIEW_ID"
   ];
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   Object.assign(process.env, {
     LARK_BASE_WEB_URL: "https://example.feishu.cn/wiki/base-node",
-    LARK_REQUEST_TABLE_ID: "request-table",
-    LARK_REQUEST_VIEW_ID: "request-view",
-    LARK_DATA_TEAM_TABLE_ID: "team-table",
-    LARK_DATA_TEAM_VIEW_ID: "team-view",
     LARK_LEDGER_TABLE_ID: "ledger-table",
-    LARK_LEDGER_VIEW_ID: "ledger-view"
+    LARK_LEDGER_VIEW_ID: "ledger-view",
+    LARK_245_TABLE_ID: "245-table",
+    LARK_245_VIEW_ID: "245-view",
+    LARK_GAOFENG_TABLE_ID: "gaofeng-table",
+    LARK_GAOFENG_VIEW_ID: "gaofeng-view"
   });
   try {
     const service = new LarkBaseSyncService({}, {}, {});
     const sources = service.sourceConfigurations();
-    assert.deepEqual(sources.map((source) => source.key), ["request", "data-team", "ledger"]);
+    assert.deepEqual(sources.map((source) => source.key), ["ledger", "project-245", "gaofeng"]);
     assert.equal(sources.every((source) => source.configured), true);
-    assert.equal(sources[0].url, "https://example.feishu.cn/wiki/base-node?table=request-table&view=request-view");
-    assert.equal(sources[2].url, "https://example.feishu.cn/wiki/base-node?table=ledger-table&view=ledger-view");
+    assert.equal(sources[0].url, "https://example.feishu.cn/wiki/base-node?table=ledger-table&view=ledger-view");
+    assert.equal(sources[2].url, "https://example.feishu.cn/wiki/base-node?table=gaofeng-table&view=gaofeng-view");
   } finally {
     for (const key of keys) {
       if (previous[key] == null) delete process.env[key];
@@ -169,19 +169,19 @@ test("three Feishu tables expose stable online links and sync in authority order
   }
 });
 
-test("three Feishu tables merge in request, data-team, ledger order", async () => {
+test("three Feishu business tables merge serially", async () => {
   const keys = [
     "LARK_BASE_TOKEN",
-    "LARK_REQUEST_TABLE_ID",
-    "LARK_DATA_TEAM_TABLE_ID",
-    "LARK_LEDGER_TABLE_ID"
+    "LARK_LEDGER_TABLE_ID",
+    "LARK_245_TABLE_ID",
+    "LARK_GAOFENG_TABLE_ID"
   ];
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   Object.assign(process.env, {
     LARK_BASE_TOKEN: "base-token",
-    LARK_REQUEST_TABLE_ID: "request-table",
-    LARK_DATA_TEAM_TABLE_ID: "team-table",
-    LARK_LEDGER_TABLE_ID: "ledger-table"
+    LARK_LEDGER_TABLE_ID: "ledger-table",
+    LARK_245_TABLE_ID: "245-table",
+    LARK_GAOFENG_TABLE_ID: "gaofeng-table"
   });
   let stored = dataset([]);
   const reads = [];
@@ -202,14 +202,39 @@ test("three Feishu tables merge in request, data-team, ledger order", async () =
   );
   try {
     const results = await service.syncAll("测试");
-    assert.deepEqual(reads, ["request-table", "team-table", "ledger-table"]);
-    assert.deepEqual(results.map((item) => item.source), ["提需求表", "数据团队总表", "总台账"]);
-    assert.equal(stored.records[0].fields["获取状态"], "ledger-table");
+    assert.deepEqual(reads, ["ledger-table", "245-table", "gaofeng-table"]);
+    assert.deepEqual(results.map((item) => item.source), ["总台账", "245", "高峰加入"]);
+    assert.equal(stored.records[0].fields["获取状态"], "gaofeng-table");
   } finally {
     for (const key of keys) {
       if (previous[key] == null) delete process.env[key];
       else process.env[key] = previous[key];
     }
+  }
+});
+
+test("Feishu Base webhook validates its secret and schedules the matching table", () => {
+  const previous = process.env.LARK_BASE_WEBHOOK_SECRET;
+  process.env.LARK_BASE_WEBHOOK_SECRET = "test-sync-secret";
+  const scheduled = [];
+  const controller = new LedgerController({}, {}, {}, {}, {}, {
+    scheduleTableSync: (tableId) => {
+      scheduled.push(tableId);
+      return tableId === "tbl245" ? { source: "245", tableId } : null;
+    }
+  });
+  try {
+    const result = controller.larkBaseWebhook(
+      undefined,
+      "test-sync-secret",
+      { tableId: "tbl245", recordId: "rec1" }
+    );
+    assert.equal(result.accepted, true);
+    assert.equal(result.source, "245");
+    assert.deepEqual(scheduled, ["tbl245"]);
+  } finally {
+    if (previous == null) delete process.env.LARK_BASE_WEBHOOK_SECRET;
+    else process.env.LARK_BASE_WEBHOOK_SECRET = previous;
   }
 });
 

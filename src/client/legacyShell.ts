@@ -37,7 +37,7 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
           <button id="fieldSettingsButton" class="button admin-only hidden" type="button">自定义词条</button>
           <button id="larkSourcesButton" class="button admin-only hidden" type="button">飞书数据源</button>
           <button id="userManagementButton" class="button admin-only hidden" type="button">管理员审批</button>
-          <button id="addRecordButton" class="button admin-only hidden" type="button">添加数据</button>
+          <button id="addRecordButton" class="button admin-only hidden" type="button">去飞书添加</button>
           <button id="importButton" class="button primary admin-only hidden" type="button">上传 Excel</button>
           <button id="refreshButton" class="button admin-only" type="button">刷新</button>
         </div>
@@ -274,9 +274,9 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
             <label>
               <span>数据来源</span>
               <select id="excelImportSource">
-                <option value="request">提需求表</option>
                 <option value="ledger">总台账</option>
-                <option value="data-team">数据团队总表</option>
+                <option value="245">245</option>
+                <option value="gaofeng">高峰加入</option>
               </select>
             </label>
             <label>
@@ -323,7 +323,7 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
         <div>
           <div class="dialog-head">
             <div>
-              <h2>飞书在线数据源</h2>
+              <h2 id="larkSourcesTitle">飞书在线数据源</h2>
               <p id="larkSourcesHint">服务启动后立即同步，之后按配置间隔自动增量同步。</p>
             </div>
             <button id="closeLarkSourcesDialog" class="icon-button" type="button" title="关闭">×</button>

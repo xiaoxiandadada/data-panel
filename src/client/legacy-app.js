@@ -439,8 +439,8 @@ function updateNotice(meta) {
     notice.innerHTML = state.authError
       ? escapeHtml(state.authError)
       : meta.status === "error"
-      ? `数据尚未导入：${escapeHtml(meta.message || "当前本地数据为空")}。管理员可进入管理员模式后点击“导入数据”录入。`
-      : "当前本地数据为空。管理员可进入管理员模式后点击“导入数据”录入。";
+      ? `数据读取失败：${escapeHtml(meta.message || "暂时无法连接服务")}。请确认前端与后端服务均已启动后刷新。`
+      : "当前台账为空。管理员可通过“去飞书添加”维护在线表格，或上传 Excel。";
   } else {
     notice.classList.add("hidden");
   }
@@ -1158,7 +1158,7 @@ function renderWorkspace() {
   el("analyticsSection").classList.toggle("hidden", !state.adminMode || !superAdmin || state.activeView !== "analytics");
   el("adminTabs").classList.toggle("hidden", !state.adminMode || !superAdmin);
   el("importButton").classList.toggle("hidden", !superAdmin);
-  el("addRecordButton").classList.toggle("hidden", !superAdmin);
+  el("addRecordButton").classList.toggle("hidden", !state.adminMode);
   el("fieldSettingsButton").classList.toggle("hidden", !state.adminMode);
   el("larkSourcesButton").classList.toggle("hidden", !state.adminMode);
   el("userManagementButton").classList.toggle("hidden", !state.adminMode || !superAdmin);
@@ -1384,16 +1384,21 @@ function safeExternalUrl(value) {
   }
 }
 
-async function openLarkSources() {
+async function openLarkSources(mode = "sync") {
   const result = await fetchJson("/api/sync/lark/sources");
   state.larkSources = result.sources || [];
   state.larkSyncIntervalMs = Number(result.intervalMs || 300000);
   state.larkSyncStatus = result.status || {};
   const minutes = Math.max(1, Math.round(state.larkSyncIntervalMs / 60000));
+  const addMode = mode === "add";
   const syncState = state.larkSyncStatus.configured
     ? `同步服务已启用${state.larkSyncStatus.lastSyncedAt ? ` · 最近同步 ${new Date(state.larkSyncStatus.lastSyncedAt).toLocaleString("zh-CN", { hour12: false })}` : ""}`
     : "同步服务尚未完整配置";
-  el("larkSourcesHint").textContent = `${syncState}；服务启动后立即同步，之后每 ${minutes} 分钟自动增量同步。`;
+  const pushState = state.larkSyncStatus.eventPushConfigured ? "飞书变更会秒级触发同步" : "实时推送密钥待配置";
+  el("larkSourcesTitle").textContent = addMode ? "选择飞书表格" : "飞书在线数据源";
+  el("larkSourcesHint").textContent = addMode
+    ? "选择要维护的数据表，新增和修改操作将在飞书中完成。"
+    : `${syncState}；${pushState}，并每 ${minutes} 分钟自动校准。`;
   el("larkSourcesList").innerHTML = state.larkSources.map((source, index) => {
     const url = safeExternalUrl(source.url);
     return `
@@ -1407,11 +1412,11 @@ async function openLarkSources() {
         </div>
         <div class="lark-source-actions">
           <span class="source-state ${source.configured ? "ready" : "missing"}">${source.configured ? "表已配置" : "待配置"}</span>
-          ${url ? `<a class="button mini" href="${escapeAttr(url)}" target="_blank" rel="noreferrer">打开在线表格</a>` : `<button class="button mini" type="button" disabled>未配置链接</button>`}
+          ${url ? `<a class="button mini${addMode ? " primary" : ""}" href="${escapeAttr(url)}" target="_blank" rel="noreferrer">${addMode ? "打开并添加" : "打开在线表格"}</a>` : `<button class="button mini" type="button" disabled>未配置链接</button>`}
         </div>
       </article>`;
   }).join("");
-  el("syncLarkNow").classList.toggle("hidden", !isSuperAdmin());
+  el("syncLarkNow").classList.toggle("hidden", addMode || !isSuperAdmin());
   el("larkSourcesDialog").showModal();
 }
 
@@ -1878,7 +1883,7 @@ async function updateRecord(recordId, patch) {
 
 el("refreshButton").addEventListener("click", loadData);
 el("importButton").addEventListener("click", openImportDialog);
-el("addRecordButton").addEventListener("click", () => openRecordDialog());
+el("addRecordButton").addEventListener("click", () => openLarkSources("add").catch((error) => alert(error.message)));
 el("fieldSettingsButton").addEventListener("click", openFieldSettings);
 el("larkSourcesButton").addEventListener("click", () => openLarkSources().catch((error) => alert(error.message)));
 el("userManagementButton").addEventListener("click", () => openUserManagement().catch((error) => alert(error.message)));

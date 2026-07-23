@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Headers, HttpCode, HttpException, HttpStatus, Param, Patch, Post, Query, Req, Res } from "@nestjs/common";
 import type { Request, Response } from "express";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { AuthService } from "../auth/auth.service.js";
 import { LarkOAuthService } from "../auth/lark-oauth.service.js";
 import { canEditAdminFields, canReadLogField, isSuperAdmin, projectDatasetForAdmin } from "../core/admin-views.js";
@@ -396,6 +396,36 @@ export class LedgerController {
     };
   }
 
+  @Post("api/webhooks/lark/base")
+  @HttpCode(HttpStatus.ACCEPTED)
+  larkBaseWebhook(
+    @Headers("authorization") authorization: string | undefined,
+    @Headers("x-lark-sync-secret") syncSecret: string | undefined,
+    @Body() payload: { tableId?: string; table_id?: string; recordId?: string; record_id?: string }
+  ) {
+    const expected = String(process.env.LARK_BASE_WEBHOOK_SECRET || "").trim();
+    if (!expected) {
+      throw new HttpException({ ok: false, message: "飞书实时同步入口尚未配置" }, HttpStatus.SERVICE_UNAVAILABLE);
+    }
+    const bearer = String(authorization || "").replace(/^Bearer\s+/i, "").trim();
+    const provided = String(syncSecret || bearer).trim();
+    if (!this.secureEqual(provided, expected)) {
+      throw new HttpException({ ok: false, message: "飞书实时同步签名无效" }, HttpStatus.UNAUTHORIZED);
+    }
+    const tableId = String(payload?.tableId || payload?.table_id || "").trim();
+    const source = this.larkSync.scheduleTableSync(tableId);
+    if (!source) {
+      throw new HttpException({ ok: false, message: "未识别的数据表" }, HttpStatus.BAD_REQUEST);
+    }
+    return {
+      ok: true,
+      accepted: true,
+      source: source.source,
+      tableId: source.tableId,
+      recordId: String(payload?.recordId || payload?.record_id || "").trim()
+    };
+  }
+
   @Get("api/preferences/fields")
   async fieldPreferences(@Req() request: Request, @Headers("x-admin-token") token?: string) {
     const user = this.requireAdminUser(request, token);
@@ -614,10 +644,16 @@ export class LedgerController {
 
   private importSource(source: string | undefined): string {
     const normalized = String(source || "总台账").trim().toLowerCase();
-    if (["data-team", "team", "数据团队总表"].includes(normalized)) return "数据团队总表";
-    if (["request", "requests", "提需求表"].includes(normalized)) return "提需求表";
+    if (["gaofeng", "高峰", "高峰加入", "data-team", "team"].includes(normalized)) return "高峰加入";
+    if (["245", "project-245", "项目245", "request", "requests"].includes(normalized)) return "245";
     if (["ledger", "总台账"].includes(normalized)) return "总台账";
     return String(source || "总台账").trim().slice(0, 40) || "总台账";
+  }
+
+  private secureEqual(value: string, expected: string): boolean {
+    const left = Buffer.from(value);
+    const right = Buffer.from(expected);
+    return left.length === right.length && timingSafeEqual(left, right);
   }
 
   private datasetCsv(dataset: { fields: Array<{ name?: string; id: string }>; records: LedgerRecord[] }): string {
