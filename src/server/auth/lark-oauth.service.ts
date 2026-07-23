@@ -81,6 +81,7 @@ export class LarkOAuthService {
   private readonly authHost = cleanEnv(process.env.LARK_AUTH_HOST) || "https://open.feishu.cn";
   private readonly apiHost = cleanEnv(process.env.LARK_API_HOST) || "https://open.feishu.cn";
   private tenantTokenCache: { token: string; expiresAt: number } | null = null;
+  private directoryCache: { users: LarkContactUser[]; expiresAt: number } | null = null;
 
   isConfigured(): boolean {
     return Boolean(this.appId && this.appSecret && this.redirectUri);
@@ -117,26 +118,12 @@ export class LarkOAuthService {
   async searchUsers(query: string, limit = 10): Promise<LarkContactUser[]> {
     const keyword = cleanEnv(query);
     if (!keyword) return [];
-    const token = await this.tenantAccessToken();
-    const url = new URL("/open-apis/search/v1/user", this.apiHost);
-    url.searchParams.set("user_id_type", "open_id");
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${token}`,
-        "content-type": "application/json; charset=utf-8"
-      },
-      body: JSON.stringify({
-        query: keyword,
-        page_size: Math.min(Math.max(Number(limit || 10), 1), 20)
-      })
-    });
-    const payload = (await response.json().catch(() => null)) as Record<string, any> | null;
-    if (!response.ok || !payload || (typeof payload.code === "number" && payload.code !== 0)) {
-      throw new Error(`飞书通讯录搜索失败：${payload?.msg || payload?.message || response.statusText}`);
-    }
-    const users = this.extractSearchUsers(payload);
-    return users.slice(0, Math.min(Math.max(Number(limit || 10), 1), 20));
+    const normalized = keyword.toLowerCase();
+    const users = await this.directoryUsers();
+    return users
+      .filter((user) => [user.name, user.email, user.department]
+        .some((value) => cleanEnv(value).toLowerCase().includes(normalized)))
+      .slice(0, Math.min(Math.max(Number(limit || 10), 1), 20));
   }
 
   async sendTextMessage(openId: string, text: string): Promise<void> {
@@ -261,30 +248,84 @@ export class LarkOAuthService {
     return payload.tenant_access_token;
   }
 
-  private extractSearchUsers(payload: Record<string, any>): LarkContactUser[] {
-    const candidates =
-      payload.data?.users ||
-      payload.data?.items ||
-      payload.data?.result?.users ||
-      payload.users ||
-      [];
-    if (!Array.isArray(candidates)) return [];
-    return candidates
-      .map((item) => {
-        const user = item.user || item;
-        const name = cleanEnv(user.name || user.cn_name || user.en_name || user.display_name || user.email);
-        const openId = cleanEnv(user.open_id || user.openId || user.user_id || user.userId || user.id);
-        if (!name || !openId) return null;
-        const departments = user.departments || user.department_ids || user.department_path || user.department;
-        return {
-          openId,
-          name,
-          email: cleanEnv(user.email) || undefined,
-          department: Array.isArray(departments) ? departments.map((item) => cleanEnv(item.name || item)).filter(Boolean).join(" / ") : cleanEnv(departments) || undefined,
-          avatar: cleanEnv(user.avatar_url || user.avatar_thumb || user.avatar?.avatar_72 || user.avatar?.avatar_origin) || undefined
-        };
-      })
-      .filter(Boolean) as LarkContactUser[];
+  private async directoryUsers(): Promise<LarkContactUser[]> {
+    if (this.directoryCache && this.directoryCache.expiresAt > Date.now()) {
+      return this.directoryCache.users;
+    }
+    const token = await this.tenantAccessToken();
+    const departmentUrl = new URL("/open-apis/contact/v3/departments/0/children", this.apiHost);
+    departmentUrl.searchParams.set("department_id_type", "open_department_id");
+    departmentUrl.searchParams.set("fetch_child", "true");
+    departmentUrl.searchParams.set("page_size", "50");
+    const departments = await this.pagedDirectoryItems(departmentUrl, token, "飞书部门通讯录读取失败");
+    const departmentNames = new Map<string, string>([["0", "根部门"]]);
+    departments.forEach((department) => {
+      const id = cleanEnv(department.open_department_id || department.department_id);
+      if (id) departmentNames.set(id, cleanEnv(department.name) || id);
+    });
+
+    const departmentIds = [...departmentNames.keys()];
+    const rawUsers: Record<string, any>[] = [];
+    for (let index = 0; index < departmentIds.length; index += 6) {
+      const pages = await Promise.all(departmentIds.slice(index, index + 6).map(async (departmentId) => {
+        const userUrl = new URL("/open-apis/contact/v3/users/find_by_department", this.apiHost);
+        userUrl.searchParams.set("user_id_type", "open_id");
+        userUrl.searchParams.set("department_id_type", "open_department_id");
+        userUrl.searchParams.set("department_id", departmentId);
+        userUrl.searchParams.set("page_size", "50");
+        return this.pagedDirectoryItems(userUrl, token, "飞书成员通讯录读取失败");
+      }));
+      rawUsers.push(...pages.flat());
+    }
+
+    const usersById = new Map<string, LarkContactUser>();
+    rawUsers.forEach((item) => {
+      const user = item.user || item;
+      const name = cleanEnv(user.name || user.cn_name || user.en_name || user.display_name || user.email);
+      const openId = cleanEnv(user.open_id || user.openId);
+      if (!name || !openId) return;
+      const departmentIdsForUser = Array.isArray(user.department_ids) ? user.department_ids : [];
+      const department = departmentIdsForUser
+        .map((id: unknown) => departmentNames.get(cleanEnv(String(id))) || "")
+        .filter(Boolean)
+        .join(" / ");
+      usersById.set(openId, {
+        openId,
+        name,
+        email: cleanEnv(user.email) || undefined,
+        department: department || undefined,
+        avatar: cleanEnv(user.avatar_url || user.avatar_thumb || user.avatar?.avatar_72 || user.avatar?.avatar_origin) || undefined
+      });
+    });
+    const users = [...usersById.values()].sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
+    this.directoryCache = {
+      users,
+      expiresAt: Date.now() + 5 * 60 * 1000
+    };
+    return users;
+  }
+
+  private async pagedDirectoryItems(url: URL, token: string, errorLabel: string): Promise<Record<string, any>[]> {
+    const items: Record<string, any>[] = [];
+    let pageToken = "";
+    do {
+      const pageUrl = new URL(url);
+      if (pageToken) pageUrl.searchParams.set("page_token", pageToken);
+      const response = await fetch(pageUrl, {
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json; charset=utf-8"
+        }
+      });
+      const payload = (await response.json().catch(() => null)) as Record<string, any> | null;
+      if (!response.ok || !payload || (typeof payload.code === "number" && payload.code !== 0)) {
+        throw new Error(`${errorLabel}：${payload?.msg || payload?.message || response.statusText}`);
+      }
+      const pageItems = payload.data?.items;
+      if (Array.isArray(pageItems)) items.push(...pageItems);
+      pageToken = payload.data?.has_more ? cleanEnv(payload.data?.page_token) : "";
+    } while (pageToken);
+    return items;
   }
 
   private async exchangeCode(code: string): Promise<string> {
