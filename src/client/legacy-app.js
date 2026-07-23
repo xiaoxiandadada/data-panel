@@ -195,7 +195,7 @@ let state = {
   personPickerTarget: null,
   personSearchRequestId: 0,
   personPickerTimer: 0,
-  fieldPreferences: { hiddenFields: [], fieldOrder: [], pinnedFields: ["项目名称"] },
+  fieldPreferences: { hiddenFields: [], fieldOrder: [], pinnedFields: [] },
   fieldPreferencesBackup: null,
   draggedField: "",
   larkSources: [],
@@ -204,7 +204,6 @@ let state = {
   adminUsers: [],
   adminCandidates: [],
   adminUserQuery: "",
-  adminSearchTimer: 0,
   importPreview: null,
   importFile: null,
   efficiency: null,
@@ -233,7 +232,9 @@ function visibleAdminColumns() {
   const hidden = new Set(state.fieldPreferences.hiddenFields || []);
   const configured = (state.fieldPreferences.fieldOrder || []).filter((field) => state.fields.some((item) => (item.name || item.id) === field));
   const source = configured.length ? configured : TABLE_COLUMNS;
-  return orderAndPinColumns([...new Set(source)].filter((field) => !hidden.has(field)));
+  const visible = orderAndPinColumns([...new Set(source)].filter((field) => !hidden.has(field)));
+  const fixed = (state.fieldPreferences.pinnedFields || []).filter((field) => visible.includes(field)).slice(0, 4);
+  return fixed.length ? fixed : visible;
 }
 
 function orderAndPinColumns(columns) {
@@ -804,7 +805,7 @@ function renderHeaderCell(column, columns = []) {
             <button class="column-action ${state.sortField === column ? "active" : ""}" type="button"
               data-sort-column="${escapeAttr(column)}" title="${escapeAttr(sortLabel)}">${state.sortField === column && state.sortDirection === "desc" ? "↓" : "↑"}</button>
             <button class="column-action ${pinned ? "active" : ""}" type="button"
-              data-pin-column="${escapeAttr(column)}" title="${pinned ? "取消固定" : "固定列"}">⌖</button>
+              data-pin-column="${escapeAttr(column)}" title="${pinned ? "取消固定并恢复常规视图" : "固定后仅显示所选词条"}">⌖</button>
             <button class="column-action" type="button" data-hide-column="${escapeAttr(column)}" title="隐藏列">−</button>
           </span>
         </span>
@@ -1143,7 +1144,7 @@ async function loadData() {
 
 async function loadFieldPreferences() {
   const result = await fetchJson("/api/preferences/fields");
-  state.fieldPreferences = result.preferences || { hiddenFields: [], fieldOrder: [], pinnedFields: ["项目名称"] };
+  state.fieldPreferences = result.preferences || { hiddenFields: [], fieldOrder: [], pinnedFields: [] };
 }
 
 async function openUserManagement() {
@@ -1152,6 +1153,8 @@ async function openUserManagement() {
   state.adminCandidates = [];
   state.adminUserQuery = "";
   el("userManagementSearch").value = "";
+  el("userManagementSearchStatus").textContent = "在系统内查询飞书企业通讯录，不会跳转新页面。";
+  el("userManagementSearchStatus").classList.remove("error");
   renderUserManagement();
   el("userManagementDialog").showModal();
 }
@@ -1243,12 +1246,26 @@ async function searchAdminCandidates(query) {
   const keyword = String(query || "").trim();
   if (!keyword) {
     state.adminCandidates = [];
+    el("userManagementSearchStatus").textContent = "请输入企业成员姓名后搜索。";
+    el("userManagementSearchStatus").classList.remove("error");
     renderUserManagement();
     return;
   }
-  const result = await fetchJson(`/api/lark/users/search?q=${encodeURIComponent(keyword)}&limit=12`);
-  state.adminCandidates = result.users || [];
-  renderUserManagement();
+  el("userManagementSearchStatus").textContent = "正在查询飞书企业通讯录…";
+  el("userManagementSearchStatus").classList.remove("error");
+  try {
+    const result = await fetchJson(`/api/lark/users/search?q=${encodeURIComponent(keyword)}&limit=12`);
+    state.adminCandidates = result.users || [];
+    el("userManagementSearchStatus").textContent = state.adminCandidates.length
+      ? `找到 ${state.adminCandidates.length} 位飞书企业成员，请在下方任命。`
+      : `飞书通讯录中没有找到“${keyword}”。`;
+    renderUserManagement();
+  } catch (error) {
+    state.adminCandidates = [];
+    el("userManagementSearchStatus").textContent = `飞书通讯录查询失败：${error.message}`;
+    el("userManagementSearchStatus").classList.add("error");
+    renderUserManagement();
+  }
 }
 
 function fieldPreferenceOrder() {
@@ -1265,9 +1282,11 @@ function fieldSettingRow(field, visible) {
       <button class="drag-handle" type="button" title="拖动排序" aria-label="拖动 ${escapeAttr(field)}">⋮⋮</button>
       <span class="field-setting-name">${escapeHtml(field)}</span>
       <div class="field-order-actions">
-        ${visible ? `<button class="icon-button mini-icon pin-field ${pinned ? "active" : ""}" type="button" data-pin-field title="${pinned ? "取消固定" : "固定词条"}" aria-label="${pinned ? "取消固定" : "固定"} ${escapeAttr(field)}">⌖</button>` : ""}
-        <button class="icon-button mini-icon" type="button" data-toggle-field="${visible ? "hidden" : "visible"}"
-          title="${visible ? "移到隐藏词条" : "移到显示词条"}" aria-label="${visible ? "隐藏" : "显示"} ${escapeAttr(field)}">${visible ? "→" : "←"}</button>
+        <button class="icon-button mini-icon" type="button" data-move-field="up" title="上移" aria-label="上移 ${escapeAttr(field)}">↑</button>
+        <button class="icon-button mini-icon" type="button" data-move-field="down" title="下移" aria-label="下移 ${escapeAttr(field)}">↓</button>
+        ${visible ? `<button class="button mini pin-field ${pinned ? "active" : ""}" type="button" data-pin-field title="${pinned ? "取消固定" : "固定后仅显示所选词条"}">${pinned ? "取消固定" : "固定"}</button>` : ""}
+        <button class="button mini field-visibility-button" type="button" data-toggle-field="${visible ? "hidden" : "visible"}"
+          title="${visible ? "隐藏词条" : "恢复词条"}" aria-label="${visible ? "隐藏" : "恢复"} ${escapeAttr(field)}">${visible ? "隐藏" : "恢复"}</button>
       </div>
     </div>`;
 }
@@ -1915,14 +1934,16 @@ el("userManagementList").addEventListener("click", (event) => {
 });
 el("userManagementSearch").addEventListener("input", (event) => {
   state.adminUserQuery = event.target.value;
-  window.clearTimeout(state.adminSearchTimer);
-  state.adminSearchTimer = window.setTimeout(() => {
-    searchAdminCandidates(state.adminUserQuery).catch((error) => {
-      state.adminCandidates = [];
-      renderUserManagement();
-      alert(error.message);
-    });
-  }, 300);
+  if (!state.adminUserQuery.trim()) {
+    state.adminCandidates = [];
+    el("userManagementSearchStatus").textContent = "在系统内查询飞书企业通讯录，不会跳转新页面。";
+    el("userManagementSearchStatus").classList.remove("error");
+    renderUserManagement();
+  }
+});
+el("userManagementSearchForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  searchAdminCandidates(state.adminUserQuery);
 });
 el("adminTabs").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-view]");
@@ -2115,9 +2136,28 @@ el("recordForm").addEventListener("submit", async (event) => {
 el("closeFieldSettingsDialog").addEventListener("click", cancelFieldSettings);
 el("cancelFieldSettings").addEventListener("click", cancelFieldSettings);
 el("saveFieldSettings").addEventListener("click", () => saveFieldSettings().catch((error) => alert(error.message)));
+el("restoreAllFields").addEventListener("click", () => {
+  [...el("hiddenFieldSettings").querySelectorAll("[data-field-setting]")].forEach((row) => {
+    el("visibleFieldSettings").appendChild(row);
+  });
+  captureFieldSettings();
+  renderFieldSettings();
+});
 el("fieldSettingsList").addEventListener("click", (event) => {
   const row = event.target.closest("[data-field-setting]");
   if (!row) return;
+  const move = event.target.closest("button[data-move-field]")?.dataset.moveField;
+  if (move) {
+    if (move === "up" && row.previousElementSibling?.matches("[data-field-setting]")) {
+      row.parentElement.insertBefore(row, row.previousElementSibling);
+    }
+    if (move === "down" && row.nextElementSibling?.matches("[data-field-setting]")) {
+      row.parentElement.insertBefore(row.nextElementSibling, row);
+    }
+    captureFieldSettings();
+    renderFieldSettings();
+    return;
+  }
   const targetZone = event.target.closest("button[data-toggle-field]")?.dataset.toggleField;
   if (targetZone) {
     if (targetZone === "hidden") row.dataset.pinned = "false";

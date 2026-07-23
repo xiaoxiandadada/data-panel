@@ -286,7 +286,7 @@ export class LedgerStoreService implements OnModuleInit {
   }
 
   async readUserFieldPreferences(openId: string): Promise<UserFieldPreferences> {
-    const fallback: UserFieldPreferences = { openId, hiddenFields: [], fieldOrder: [], pinnedFields: ["项目名称"], updatedAt: "" };
+    const fallback: UserFieldPreferences = { openId, hiddenFields: [], fieldOrder: [], pinnedFields: [], updatedAt: "" };
     if (this.mongoReady && this.db) {
       const stored = await this.userFieldPreferences().findOne({ openId }, { projection: { _id: 0 } });
       return stored ? { ...fallback, ...stored } as UserFieldPreferences : fallback;

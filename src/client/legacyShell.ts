@@ -309,17 +309,26 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
           <div class="dialog-head">
             <div>
               <h2>自定义词条</h2>
-              <p>拖动调整列顺序或显示状态；最多固定 4 列，设置仅对当前管理员生效。</p>
+              <p>可拖动或使用上下按钮排序；固定后台账仅显示固定词条，取消全部固定即可恢复常规视图。</p>
             </div>
             <button id="closeFieldSettingsDialog" class="icon-button" type="button" title="关闭">×</button>
           </div>
           <div id="fieldSettingsList" class="field-settings-board">
             <section class="field-settings-column">
-              <header><div><strong>显示词条</strong><span>按当前顺序显示</span></div><b id="visibleFieldCount">0</b></header>
+              <header>
+                <div><strong>显示词条</strong><span>最多固定 4 个常用词条</span></div>
+                <b id="visibleFieldCount">0</b>
+              </header>
               <div id="visibleFieldSettings" class="field-drop-zone" data-field-zone="visible"></div>
             </section>
             <section class="field-settings-column">
-              <header><div><strong>隐藏词条</strong><span>拖回左侧即可恢复</span></div><b id="hiddenFieldCount">0</b></header>
+              <header>
+                <div><strong>隐藏词条</strong><span>可逐项恢复或全部恢复</span></div>
+                <div class="field-column-actions">
+                  <b id="hiddenFieldCount">0</b>
+                  <button id="restoreAllFields" class="button mini" type="button">恢复全部</button>
+                </div>
+              </header>
               <div id="hiddenFieldSettings" class="field-drop-zone" data-field-zone="hidden"></div>
             </section>
           </div>
@@ -357,12 +366,16 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
             <button id="closeUserManagementDialog" class="icon-button" type="button" title="关闭">×</button>
           </div>
           <div class="user-management-toolbar">
-            <label>
-              <span>添加管理员</span>
-              <input id="userManagementSearch" type="search" placeholder="输入姓名，在飞书通讯录中查找" autocomplete="off" />
-            </label>
+            <form id="userManagementSearchForm" class="user-management-search">
+              <label>
+                <span>添加管理员</span>
+                <input id="userManagementSearch" type="search" placeholder="输入企业成员姓名" autocomplete="off" />
+              </label>
+              <button class="button primary" type="submit">搜索飞书通讯录</button>
+            </form>
             <span id="userManagementSummary" class="muted-label">0 位成员</span>
           </div>
+          <p id="userManagementSearchStatus" class="user-management-search-status">在系统内查询飞书企业通讯录，不会跳转新页面。</p>
           <div id="userManagementList" class="user-management-list"></div>
           <div class="dialog-actions">
             <button class="button" type="button" id="cancelUserManagement">关闭</button>
