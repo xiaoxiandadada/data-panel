@@ -22,6 +22,7 @@ import {
 import type { AppUser, FieldValue, ImportBatch, LedgerRecord, UserRole } from "../core/types.js";
 import { LedgerStoreService } from "../infra/ledger-store.service.js";
 import { QueueService } from "../infra/queue.service.js";
+import { DeliveryEfficiencyService } from "../metrics/delivery-efficiency.service.js";
 import { isCompletedStatus, SatisfactionService } from "../metrics/satisfaction.service.js";
 import { LarkBaseSyncService } from "../sync/lark-base-sync.service.js";
 import { mergeImportedDataset, normalizeImport, parseCsv, parseExcel } from "./parse-utils.js";
@@ -34,7 +35,8 @@ export class LedgerController {
     private readonly larkOAuth: LarkOAuthService,
     private readonly queue: QueueService,
     private readonly satisfaction: SatisfactionService,
-    private readonly larkSync: LarkBaseSyncService
+    private readonly larkSync: LarkBaseSyncService,
+    private readonly efficiency: DeliveryEfficiencyService
   ) {}
 
   @Get("healthz")
@@ -80,6 +82,16 @@ export class LedgerController {
     this.requireAdmin(request, token);
     const dataset = await this.store.readDataset();
     return { ok: true, requesters: uniqueRequesterNames(dataset) };
+  }
+
+  @Get("api/analytics/delivery-efficiency")
+  async deliveryEfficiency(@Req() request: Request, @Headers("x-admin-token") token?: string) {
+    this.requireAdmin(request, token);
+    return {
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      ...this.efficiency.analyze(await this.store.readDataset())
+    };
   }
 
   @Get("api/lark/users/search")
@@ -289,11 +301,18 @@ export class LedgerController {
   async submitSatisfaction(
     @Req() request: Request,
     @Param("id") recordId: string,
-    @Body() payload: { score?: number; comment?: string }
+    @Body() payload: { score?: number; comment?: string; defaulted?: boolean }
   ) {
     const user = this.requireRequester(request);
     const score = Math.round(Number(payload.score || 0));
     if (score < 1 || score > 5) throw new HttpException({ ok: false, message: "满意度必须为 1 到 5 分" }, HttpStatus.BAD_REQUEST);
+    const comment = String(payload.comment || "").trim();
+    if (score < 4 && !comment) {
+      throw new HttpException({ ok: false, message: "满意度低于 4 星时必须填写理由" }, HttpStatus.BAD_REQUEST);
+    }
+    if (payload.defaulted && score !== 5) {
+      throw new HttpException({ ok: false, message: "关闭评价只能默认记为 5 星" }, HttpStatus.BAD_REQUEST);
+    }
     const dataset = await this.store.readDataset();
     const record = dataset.records.find((item) => item.record_id === recordId);
     if (!record) throw new HttpException({ ok: false, message: "需求不存在" }, HttpStatus.NOT_FOUND);
@@ -306,13 +325,12 @@ export class LedgerController {
     const before = { ...(record.fields || {}) };
     const fields: Record<string, FieldValue> = {
       "满意度": score,
-      "满意度评价": String(payload.comment || "").trim(),
-      "满意度评价来源": "需求方主动评价",
+      "满意度评价": payload.defaulted ? "用户关闭评价，默认五星好评" : comment,
+      "满意度评价来源": payload.defaulted ? "用户关闭默认" : "需求方主动评价",
       "满意度评价时间": new Date().toISOString()
     };
     const updated = await this.store.updateRecord(recordId, fields);
     await this.store.appendFieldChangeLogs(recordId, before, fields, user.name, "requester", "需求方提交满意度评价");
-    await this.queue.enqueue("record.updated", { recordId, fields: Object.keys(fields), actorOpenId: user.openId });
     return { ok: true, record: updated.record, data: publicDataset(updated.dataset, requesterRecords(updated.dataset, user.name)) };
   }
 
@@ -396,11 +414,15 @@ export class LedgerController {
   @Get("api/sync/lark/sources")
   async larkSyncSources(@Req() request: Request, @Headers("x-admin-token") token?: string) {
     this.requireAdminUser(request, token);
+    const batches = (await this.store.readImportBatches(100)).filter((batch) => batch.mode === "lark");
     return {
       ok: true,
       intervalMs: Math.max(Number(process.env.LARK_SYNC_INTERVAL_MS || 300_000), 60_000),
       status: this.larkSync.status(),
-      sources: this.larkSync.sourceConfigurations()
+      sources: this.larkSync.sourceConfigurations().map((source) => ({
+        ...source,
+        lastBatch: batches.find((batch) => batch.source === source.source) || null
+      }))
     };
   }
 
@@ -578,7 +600,17 @@ export class LedgerController {
     const { dataset, beforeFields, record } = await this.store.updateRecord(recordId, updatedFields);
     if (!record) throw new HttpException({ ok: false, message: "记录不存在" }, HttpStatus.NOT_FOUND);
     await this.store.appendFieldChangeLogs(recordId, beforeFields, updatedFields, actorFromPayload(payload, user?.name || "管理员"), user?.role || "admin");
-    await this.queue.enqueue("record.updated", { recordId, fields: Object.keys(updatedFields), actorOpenId: user?.openId || "" });
+    const beforeStatus = stringifyCell(beforeFields["获取状态"]).trim() || "未设置";
+    const afterStatus = stringifyCell(record.fields["获取状态"]).trim() || "未设置";
+    if (Object.hasOwn(updatedFields, "获取状态") && beforeStatus !== afterStatus) {
+      await this.queue.enqueue("record.updated", {
+        recordId,
+        fields: ["获取状态"],
+        beforeStatus,
+        afterStatus,
+        actorOpenId: user?.openId || ""
+      });
+    }
     const projected = projectDatasetForAdmin(dataset, admin);
     return {
       ok: true,

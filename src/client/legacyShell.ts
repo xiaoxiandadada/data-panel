@@ -99,6 +99,7 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
 
       <nav id="adminTabs" class="view-tabs admin-only" aria-label="管理员视图">
         <button class="view-tab active" type="button" data-view="ledger">管理员台账</button>
+        <button class="view-tab" type="button" data-view="efficiency">交付效率</button>
       </nav>
 
       <section id="requesterSection" class="requester-section hidden" aria-label="需求方进展">
@@ -186,6 +187,41 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
             <span id="timelineHint">按截止时间排序</span>
           </div>
           <div id="timeline" class="timeline"></div>
+        </div>
+      </section>
+
+      <section id="efficiencySection" class="efficiency-section hidden" aria-label="交付效率分析">
+        <div class="efficiency-heading">
+          <div>
+            <p class="eyebrow">Delivery Efficiency</p>
+            <h2>交付效率分析</h2>
+            <p>按 Q1 / Q2 对比六个交付环节，并统计预计与实际交付偏差。</p>
+          </div>
+          <span id="efficiencyGeneratedAt">尚未计算</span>
+        </div>
+        <div id="efficiencyKpis" class="efficiency-kpis"></div>
+        <div class="efficiency-block">
+          <div class="panel-head">
+            <h3>六个环节耗时</h3>
+            <span>效率提升 =（Q1 − Q2）/ Q1</span>
+          </div>
+          <div id="efficiencyStages" class="table-wrap"></div>
+        </div>
+        <div class="efficiency-grid">
+          <div class="efficiency-block">
+            <div class="panel-head">
+              <h3>预计与实际交付偏差</h3>
+              <span>负值提前，正值延期</span>
+            </div>
+            <div id="efficiencyDeviation"></div>
+          </div>
+          <div class="efficiency-block">
+            <div class="panel-head">
+              <h3>按数据来源</h3>
+              <span>合并台账口径</span>
+            </div>
+            <div id="efficiencySources" class="table-wrap"></div>
+          </div>
         </div>
       </section>
 

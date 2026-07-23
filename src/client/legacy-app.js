@@ -206,7 +206,9 @@ let state = {
   adminUserQuery: "",
   adminSearchTimer: 0,
   importPreview: null,
-  importFile: null
+  importFile: null,
+  efficiency: null,
+  efficiencyLoading: false
 };
 
 const el = (id) => document.getElementById(id);
@@ -977,26 +979,99 @@ function renderSatisfactionControl(record) {
   return `
     <form class="satisfaction-form" data-satisfaction-record="${escapeHtml(record.record_id)}">
       <label><span>交付满意度</span><select name="score" required><option value="">请选择</option><option value="5">5 分</option><option value="4">4 分</option><option value="3">3 分</option><option value="2">2 分</option><option value="1">1 分</option></select></label>
-      <label><span>评价说明</span><input name="comment" placeholder="可选" /></label>
+      <label><span>评价说明</span><input name="comment" placeholder="1–3 星必须填写理由" /></label>
       <button class="button mini" type="submit">提交评价</button>
+      <button class="button mini subtle" type="button" data-default-satisfaction="${escapeHtml(record.record_id)}">关闭并默认五星</button>
     </form>`;
 }
 
-async function submitSatisfaction(recordId, score, comment) {
+async function submitSatisfaction(recordId, score, comment, defaulted = false) {
   const result = await fetchJson(`/api/requests/${encodeURIComponent(recordId)}/satisfaction`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ score: Number(score), comment })
+    body: JSON.stringify({ score: Number(score), comment, defaulted })
   });
   state.requesterRecords = result.data?.records || await loadRequesterRecords();
   renderAll();
 }
 
+function metricValue(value, suffix = "天") {
+  return value == null ? "N/A" : `${Number(value).toFixed(2).replace(/\.?0+$/, "")}${suffix}`;
+}
+
+function renderEfficiency() {
+  const target = el("efficiencySection");
+  if (!state.efficiency) {
+    target.classList.remove("hidden");
+    el("efficiencyKpis").innerHTML = `<div class="empty">${state.efficiencyLoading ? "正在计算交付效率…" : "暂无交付效率数据"}</div>`;
+    el("efficiencyStages").innerHTML = "";
+    el("efficiencyDeviation").innerHTML = "";
+    el("efficiencySources").innerHTML = "";
+    return;
+  }
+  const data = state.efficiency;
+  const fullStage = data.stages.find((stage) => stage.key === "proposed_to_delivered");
+  el("efficiencyGeneratedAt").textContent = `计算时间 ${new Date(data.generatedAt).toLocaleString("zh-CN", { hour12: false })}`;
+  el("efficiencyKpis").innerHTML = `
+    <article><span>合并台账</span><strong>${data.totalRecords}</strong><small>去重后的需求数</small></article>
+    <article><span>可分析项目</span><strong>${data.analyzableRecords}</strong><small>至少具备一组有效节点</small></article>
+    <article><span>Q1 全流程</span><strong>${metricValue(fullStage?.q1.averageDays)}</strong><small>${fullStage?.q1.sampleCount || 0} 个样本</small></article>
+    <article><span>Q2 全流程</span><strong>${metricValue(fullStage?.q2.averageDays)}</strong><small>${fullStage?.q2.sampleCount || 0} 个样本</small></article>
+  `;
+  el("efficiencyStages").innerHTML = `
+    <table class="efficiency-table">
+      <thead><tr><th>交付环节</th><th>Q1 样本</th><th>Q1 平均</th><th>Q2 样本</th><th>Q2 平均</th><th>效率提升</th></tr></thead>
+      <tbody>${data.stages.map((stage) => `
+        <tr>
+          <td>${escapeHtml(stage.label)}</td>
+          <td>${stage.q1.sampleCount}</td>
+          <td>${metricValue(stage.q1.averageDays)}</td>
+          <td>${stage.q2.sampleCount}</td>
+          <td>${metricValue(stage.q2.averageDays)}</td>
+          <td class="${stage.improvementPercent > 0 ? "positive" : stage.improvementPercent < 0 ? "negative" : ""}">${metricValue(stage.improvementPercent, "%")}</td>
+        </tr>`).join("")}</tbody>
+    </table>`;
+  el("efficiencyDeviation").innerHTML = ["q1", "q2"].map((quarter) => {
+    const item = data.deliveryDeviation[quarter];
+    return `
+      <div class="deviation-row">
+        <strong>${quarter.toUpperCase()}</strong>
+        <span>平均 ${metricValue(item.averageDays)}</span>
+        <span>${item.sampleCount} 个样本</span>
+        <span class="early">提前 ${item.earlyCount}</span>
+        <span>准时 ${item.onTimeCount}</span>
+        <span class="late">延期 ${item.delayedCount}</span>
+      </div>`;
+  }).join("");
+  el("efficiencySources").innerHTML = `
+    <table class="efficiency-table compact">
+      <thead><tr><th>数据来源</th><th>Q1 样本 / 平均偏差</th><th>Q2 样本 / 平均偏差</th></tr></thead>
+      <tbody>${data.bySource.map((source) => `
+        <tr>
+          <td>${escapeHtml(source.source)}</td>
+          <td>${source.q1.sampleCount} / ${metricValue(source.q1.averageDays)}</td>
+          <td>${source.q2.sampleCount} / ${metricValue(source.q2.averageDays)}</td>
+        </tr>`).join("") || `<tr><td colspan="3">暂无可分析数据</td></tr>`}</tbody>
+    </table>`;
+}
+
+async function loadEfficiency() {
+  if (state.efficiencyLoading) return;
+  state.efficiencyLoading = true;
+  renderEfficiency();
+  try {
+    state.efficiency = await fetchJson("/api/analytics/delivery-efficiency");
+  } finally {
+    state.efficiencyLoading = false;
+  }
+  renderEfficiency();
+}
+
 function renderWorkspace() {
   const records = filteredRecords();
   const superAdmin = isSuperAdmin();
-  if (state.adminMode) state.activeView = "ledger";
-  const showAdminData = state.adminMode;
+  const showAdminData = state.adminMode && state.activeView === "ledger";
+  const showEfficiency = state.adminMode && state.activeView === "efficiency";
 
   el("loginGate").classList.toggle("hidden", Boolean(state.authRole));
   el("requesterSection").classList.toggle("hidden", state.authRole !== "requester");
@@ -1004,6 +1079,7 @@ function renderWorkspace() {
   el("kpiSection").classList.toggle("hidden", !showAdminData);
   el("dashboardSection").classList.toggle("hidden", !showAdminData);
   el("worklistSection").classList.toggle("hidden", !showAdminData);
+  el("efficiencySection").classList.toggle("hidden", !showEfficiency);
   el("adminTabs").classList.toggle("hidden", !state.adminMode);
   el("importButton").classList.toggle("hidden", !superAdmin);
   el("addRecordButton").classList.toggle("hidden", !state.adminMode);
@@ -1034,7 +1110,7 @@ function renderWorkspace() {
   }
 
   el("adminTabs").querySelectorAll("[data-view]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.view === "ledger");
+    button.classList.toggle("active", button.dataset.view === state.activeView);
   });
 
   if (showAdminData) {
@@ -1044,6 +1120,7 @@ function renderWorkspace() {
     renderTimeline(records);
     renderTable(records);
   }
+  if (showEfficiency) renderEfficiency();
   updateModeUI();
 }
 
@@ -1324,12 +1401,14 @@ async function openLarkSources(mode = "sync") {
     ? `同步服务已启用${state.larkSyncStatus.lastSyncedAt ? ` · 最近同步 ${new Date(state.larkSyncStatus.lastSyncedAt).toLocaleString("zh-CN", { hour12: false })}` : ""}`
     : "同步服务尚未完整配置";
   const pushState = state.larkSyncStatus.eventPushConfigured ? "飞书变更会秒级触发同步" : "实时推送密钥待配置";
+  const syncError = state.larkSyncStatus.lastError ? `；最近同步失败：${state.larkSyncStatus.lastError}` : "";
   el("larkSourcesTitle").textContent = addMode ? "选择飞书表格" : "飞书在线数据源";
   el("larkSourcesHint").textContent = addMode
     ? "选择要维护的数据表，新增和修改操作将在飞书中完成。"
-    : `${syncState}；${pushState}，并每 ${minutes} 分钟自动校准。`;
+    : `${syncState}；${pushState}，并每 ${minutes} 分钟自动校准${syncError}。`;
   el("larkSourcesList").innerHTML = state.larkSources.map((source, index) => {
     const url = safeExternalUrl(source.url);
+    const batch = source.lastBatch;
     return `
       <article class="lark-source-row">
         <div class="lark-source-copy">
@@ -1337,6 +1416,7 @@ async function openLarkSources(mode = "sync") {
           <div>
             <strong>${escapeHtml(source.source)}</strong>
             <span>${source.configured ? escapeHtml(source.tableId) : "尚未配置 table_id"}${source.viewId ? ` · ${escapeHtml(source.viewId)}` : ""}</span>
+            <span>${batch ? `最近读取 ${Number(batch.total || 0)} 条 · ${new Date(batch.createdAt).toLocaleString("zh-CN", { hour12: false })}` : "尚无成功同步批次"}</span>
           </div>
         </div>
         <div class="lark-source-actions">
@@ -1849,6 +1929,9 @@ el("adminTabs").addEventListener("click", (event) => {
   if (!button) return;
   state.activeView = button.dataset.view;
   renderWorkspace();
+  if (state.activeView === "efficiency" && !state.efficiency) {
+    loadEfficiency().catch((error) => alert(error.message));
+  }
 });
 el("requesterLoginButton").addEventListener("click", () => openRequesterAuthDialog("login"));
 el("requesterRegisterButton").addEventListener("click", () => openRequesterAuthDialog("register"));
@@ -1864,6 +1947,15 @@ document.addEventListener("click", (event) => {
   openPersonPicker(input, button.dataset.personMultiple === "true");
 });
 el("requesterCards").addEventListener("click", async (event) => {
+  const defaultSatisfactionId = event.target.closest("button[data-default-satisfaction]")?.dataset.defaultSatisfaction;
+  if (defaultSatisfactionId) {
+    try {
+      await submitSatisfaction(defaultSatisfactionId, 5, "用户关闭评价，默认五星好评", true);
+    } catch (error) {
+      alert(error.message);
+    }
+    return;
+  }
   const saveId = event.target.closest("button[data-save-followers]")?.dataset.saveFollowers;
   if (!saveId) return;
   const input = el("requesterCards").querySelector(`input[data-follower-input="${CSS.escape(saveId)}"]`);
@@ -1879,7 +1971,10 @@ el("requesterCards").addEventListener("submit", async (event) => {
   event.preventDefault();
   const data = new FormData(form);
   try {
-    await submitSatisfaction(form.dataset.satisfactionRecord, data.get("score"), data.get("comment"));
+    const score = Number(data.get("score"));
+    const comment = String(data.get("comment") || "").trim();
+    if (score < 4 && !comment) throw new Error("满意度低于 4 星时必须填写理由");
+    await submitSatisfaction(form.dataset.satisfactionRecord, score, comment);
   } catch (error) {
     alert(error.message);
   }

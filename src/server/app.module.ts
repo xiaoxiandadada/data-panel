@@ -5,6 +5,7 @@ import { LedgerStoreService } from "./infra/ledger-store.service.js";
 import { QueueService } from "./infra/queue.service.js";
 import { LedgerController } from "./ledger/ledger.controller.js";
 import { LarkNotificationService } from "./notifications/lark-notification.service.js";
+import { DeliveryEfficiencyService } from "./metrics/delivery-efficiency.service.js";
 import { SatisfactionService } from "./metrics/satisfaction.service.js";
 import { LarkBaseSyncService } from "./sync/lark-base-sync.service.js";
 
@@ -16,6 +17,7 @@ import { LarkBaseSyncService } from "./sync/lark-base-sync.service.js";
     LedgerStoreService,
     LarkNotificationService,
     QueueService,
+    DeliveryEfficiencyService,
     SatisfactionService,
     LarkBaseSyncService
   ]

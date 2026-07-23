@@ -2,8 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { mergeImportedDataset, importBusinessKey } from "../dist/server/ledger/parse-utils.js";
+import { analyzeDeliveryEfficiency } from "../dist/server/metrics/delivery-efficiency.service.js";
 import { isCompletedStatus } from "../dist/server/metrics/satisfaction.service.js";
 import { demandToLedgerFields, requesterRecords } from "../dist/server/core/ledger-utils.js";
+import { projectDatasetForAdmin } from "../dist/server/core/admin-views.js";
 import { hasAdminRole, normalizeUserRoles, primaryUserRole } from "../dist/server/core/user-roles.js";
 import { LarkOAuthService } from "../dist/server/auth/lark-oauth.service.js";
 import { LarkBaseSyncService } from "../dist/server/sync/lark-base-sync.service.js";
@@ -80,6 +82,82 @@ test("administrator and requester capabilities are assigned independently", () =
   assert.deepEqual(roles, ["delivery_admin"]);
   assert.equal(hasAdminRole(user), true);
   assert.deepEqual(normalizeUserRoles([]), ["member"]);
+});
+
+test("every delivery administrator receives the complete ledger dataset", () => {
+  const source = dataset([
+    { "项目名称": "甲", "项目对接人": "顾语莺" },
+    { "项目名称": "乙", "项目对接人": "其他管理员" }
+  ]);
+  const admin = { openId: "ou_admin", name: "顾语莺", role: "delivery_admin", roles: ["delivery_admin"] };
+  assert.deepEqual(projectDatasetForAdmin(source, admin).records.map((record) => record.fields["项目名称"]), ["甲", "乙"]);
+});
+
+test("delivery efficiency follows the six-stage Q1 and Q2 calculation rules", () => {
+  const source = dataset([
+    {
+      "项目名称": "Q1 项目",
+      "Sprint": "SP20",
+      "需求提出时间": "2026-01-01",
+      "需求澄清完成时间": "2026-01-06",
+      "解决方案对接时间": "2026-01-04",
+      "采购反馈预报价时间": "2026-01-08",
+      "开始执行时间": "2026-01-10",
+      "期望交付日期": "2026-01-20",
+      "实际交付完成日期": "2026-01-25",
+      "数据来源": "总台账"
+    },
+    {
+      "项目名称": "Q2 项目",
+      "Sprint": "SP30",
+      "需求提出时间": "2026-04-01",
+      "需求澄清完成时间": "2026-04-04",
+      "解决方案对接时间": "2026-04-03",
+      "采购反馈预报价时间": "2026-04-06",
+      "开始执行时间": "2026-04-08",
+      "期望交付日期": "2026-04-20",
+      "实际交付完成日期": "2026-04-18",
+      "数据来源": "245"
+    }
+  ]);
+  const result = analyzeDeliveryEfficiency(source);
+  const full = result.stages.find((stage) => stage.key === "proposed_to_delivered");
+  assert.equal(result.analyzableRecords, 2);
+  assert.equal(full.q1.averageDays, 24);
+  assert.equal(full.q2.averageDays, 17);
+  assert.equal(full.improvementPercent, 29.17);
+  assert.equal(result.deliveryDeviation.q1.averageDays, 5);
+  assert.equal(result.deliveryDeviation.q2.averageDays, -2);
+});
+
+test("satisfaction below four stars requires a reason", async () => {
+  const requester = {
+    openId: "ou_requester",
+    name: "需求方",
+    role: "requester",
+    roles: ["requester"]
+  };
+  const controller = new LedgerController(
+    {},
+    {
+      sessionCookieName: "delivery_session",
+      verifyToken: () => requester,
+      hasRole: (user, role) => user?.roles?.includes(role)
+    },
+    {},
+    {},
+    {},
+    {},
+    {}
+  );
+  await assert.rejects(
+    () => controller.submitSatisfaction(
+      { headers: { cookie: "delivery_session=test" } },
+      "record-1",
+      { score: 3, comment: "" }
+    ),
+    (error) => error?.response?.message === "满意度低于 4 星时必须填写理由"
+  );
 });
 
 test("super administrator appointment updates roles and writes an audit log", async () => {
@@ -303,6 +381,24 @@ test("status bot notifies requesters and assigned administrators only", async ()
   assert.deepEqual(messages.map((message) => message.openId).sort(), ["ou_admin", "ou_requester"]);
   assert.equal(messages[0].text.includes("需求澄清中 → 已完结"), true);
   assert.equal(logs[0].status, "sent");
+});
+
+test("bot skips non-status record updates", async () => {
+  const logs = [];
+  const service = new LarkNotificationService(
+    { appendNotificationLog: async (log) => logs.push(log) },
+    {}
+  );
+  await service.process({
+    id: "event-non-status",
+    eventName: "record.updated",
+    payload: { recordId: "test-1", fields: ["项目备注"] },
+    attempts: 1,
+    createdAt: new Date().toISOString()
+  });
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].status, "skipped");
+  assert.match(logs[0].error, /非需求状态变更/);
 });
 
 test("Feishu Base webhook validates its secret and schedules the matching table", () => {

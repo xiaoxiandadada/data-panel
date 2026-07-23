@@ -33,6 +33,23 @@ export class LarkNotificationService {
   ) {}
 
   async process(event: QueueEvent): Promise<void> {
+    const changedFields = Array.isArray(event.payload.fields) ? event.payload.fields.map(String) : [];
+    const statusChanged = event.eventName === "record.updated"
+      && changedFields.includes("获取状态")
+      && String(event.payload.beforeStatus || "") !== String(event.payload.afterStatus || "");
+    if (!statusChanged) {
+      await this.store.appendNotificationLog({
+        id: `${event.id}:${event.attempts}`,
+        eventName: event.eventName,
+        recordId: String(event.payload.recordId || ""),
+        status: "skipped",
+        recipients: [],
+        attempts: event.attempts,
+        error: "非需求状态变更，不发送飞书通知",
+        createdAt: new Date().toISOString()
+      });
+      return;
+    }
     const dataset = await this.store.readDataset();
     const recordId = String(event.payload.recordId || "");
     const record = dataset.records.find((item) => item.record_id === recordId);
