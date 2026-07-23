@@ -239,7 +239,11 @@ let state = {
   personPickerTarget: null,
   personSearchRequestId: 0,
   personPickerTimer: 0,
-  fieldPreferences: { hiddenFields: [], fieldOrder: [] },
+  fieldPreferences: { hiddenFields: [], fieldOrder: [], pinnedFields: ["项目名称"] },
+  fieldPreferencesBackup: null,
+  draggedField: "",
+  larkSources: [],
+  larkSyncIntervalMs: 300000,
   adminUsers: [],
   importPreview: null,
   importFile: null
@@ -267,7 +271,31 @@ function visibleAdminColumns() {
   const hidden = new Set(state.fieldPreferences.hiddenFields || []);
   const configured = (state.fieldPreferences.fieldOrder || []).filter((field) => state.fields.some((item) => (item.name || item.id) === field));
   const source = configured.length ? configured : TABLE_COLUMNS;
-  return [...new Set(source)].filter((field) => !hidden.has(field));
+  return orderAndPinColumns([...new Set(source)].filter((field) => !hidden.has(field)));
+}
+
+function orderAndPinColumns(columns) {
+  const allowed = new Set(columns);
+  const preferred = (state.fieldPreferences.fieldOrder || []).filter((field) => allowed.has(field));
+  const ordered = [...preferred, ...columns.filter((field) => !preferred.includes(field))];
+  const pinned = (state.fieldPreferences.pinnedFields || []).filter((field) => allowed.has(field)).slice(0, 4);
+  return [...pinned, ...ordered.filter((field) => !pinned.includes(field))];
+}
+
+function pinnedColumnPresentation(column, columns) {
+  const configured = new Set((state.fieldPreferences.pinnedFields || []).slice(0, 4));
+  const pinned = columns.filter((item) => configured.has(item)).slice(0, 4);
+  const index = pinned.indexOf(column);
+  if (index < 0) return { className: "", style: "" };
+  let left = 0;
+  for (let cursor = 0; cursor < index; cursor += 1) {
+    left += pinned[cursor] === "项目名称" ? 220 : 180;
+  }
+  const width = column === "项目名称" ? 220 : 180;
+  return {
+    className: "pinned-column",
+    style: `left:${left}px;min-width:${width}px;width:${width}px;max-width:${width}px`
+  };
 }
 
 function ownerNames(owner) {
@@ -802,14 +830,15 @@ function renderSearchHint(records) {
   el("projectSearchHint").textContent = `${prefix}“${state.query}”，匹配 ${records.length} 条记录`;
 }
 
-function renderHeaderCell(column) {
+function renderHeaderCell(column, columns = []) {
+  const pin = pinnedColumnPresentation(column, columns);
   if (!state.adminMode || !FILTER_FIELDS.includes(column)) {
-    return `<th>${escapeHtml(column)}</th>`;
+    return `<th class="${pin.className}" style="${pin.style}">${escapeHtml(column)}</th>`;
   }
 
   const options = uniqueValues(column);
   return `
-    <th class="filterable-head">
+    <th class="filterable-head ${pin.className}" style="${pin.style}">
       <label class="table-head-control">
         <span>${escapeHtml(column)}</span>
         <select class="table-filter-select" data-filter-field="${escapeHtml(column)}">
@@ -833,7 +862,7 @@ function renderTable(records) {
   el("records").innerHTML = `
     <table class="data-table ${state.adminMode ? "admin-table" : "visitor-table"}">
       <thead>
-        <tr>${columns.map((column) => renderHeaderCell(column)).join("")}</tr>
+        <tr>${columns.map((column) => renderHeaderCell(column, tableColumns)).join("")}</tr>
       </thead>
       <tbody>
         ${records.map((record) => renderRow(record)).join("")}
@@ -848,11 +877,12 @@ function renderRow(record) {
   const tableColumns = state.adminMode ? visibleAdminColumns() : VISITOR_COLUMNS;
   const cells = tableColumns.map((column) => {
     const value = cell(record, column);
+    const pin = pinnedColumnPresentation(column, tableColumns);
     if (column === "获取状态" && state.adminMode) {
-      return `<td class="status-cell">${renderStatusSelect(record, value)}</td>`;
+      return `<td class="status-cell ${pin.className}" style="${pin.style}">${renderStatusSelect(record, value)}</td>`;
     }
-    const className = column === "项目名称" ? "project-name-cell" : "";
-    return `<td class="${className}" title="${escapeHtml(value)}">${renderFieldValue(column, value)}</td>`;
+    const className = `${column === "项目名称" ? "project-name-cell" : ""} ${pin.className}`;
+    return `<td class="${className}" style="${pin.style}" title="${escapeHtml(value)}">${renderFieldValue(column, value)}</td>`;
   }).join("");
 
   return `
@@ -997,9 +1027,10 @@ async function submitSatisfaction(recordId, score, comment) {
 
 function columnsForOwnerGroup(group) {
   const hidden = new Set(state.fieldPreferences.hiddenFields || []);
-  return [...new Set([...CORE_COLUMNS, ...(group?.fields || [])])]
+  const columns = [...new Set([...CORE_COLUMNS, ...(group?.fields || [])])]
     .filter((column) => !hidden.has(column))
     .filter((column) => state.fields.some((field) => (field.name || field.id) === column) || TABLE_COLUMNS.includes(column));
+  return orderAndPinColumns(columns);
 }
 
 function renderGenericTable(containerId, records, columns, editable = false) {
@@ -1012,7 +1043,7 @@ function renderGenericTable(containerId, records, columns, editable = false) {
   container.innerHTML = `
     <table class="data-table admin-table">
       <thead>
-        <tr>${finalColumns.map((column) => editable ? renderHeaderCell(column) : `<th>${escapeHtml(column)}</th>`).join("")}</tr>
+        <tr>${finalColumns.map((column) => editable ? renderHeaderCell(column, columns) : `<th>${escapeHtml(column)}</th>`).join("")}</tr>
       </thead>
       <tbody>
         ${records.map((record) => renderRowWithColumns(record, columns, editable)).join("")}
@@ -1024,11 +1055,12 @@ function renderGenericTable(containerId, records, columns, editable = false) {
 function renderRowWithColumns(record, columns, editable = false) {
   const cells = columns.map((column) => {
     const value = cell(record, column);
+    const pin = pinnedColumnPresentation(column, columns);
     if (column === "获取状态" && editable && canEditOwnerField(column)) {
-      return `<td class="status-cell">${renderStatusSelect(record, value)}</td>`;
+      return `<td class="status-cell ${pin.className}" style="${pin.style}">${renderStatusSelect(record, value)}</td>`;
     }
-    const className = column === "项目名称" ? "project-name-cell" : "";
-    return `<td class="${className}" title="${escapeHtml(value)}">${renderFieldValue(column, value)}</td>`;
+    const className = `${column === "项目名称" ? "project-name-cell" : ""} ${pin.className}`;
+    return `<td class="${className}" style="${pin.style}" title="${escapeHtml(value)}">${renderFieldValue(column, value)}</td>`;
   }).join("");
   return `
     <tr data-record-id="${escapeHtml(record.record_id)}">
@@ -1126,6 +1158,7 @@ function renderWorkspace() {
   el("importButton").classList.toggle("hidden", !superAdmin);
   el("addRecordButton").classList.toggle("hidden", !superAdmin);
   el("fieldSettingsButton").classList.toggle("hidden", !state.adminMode);
+  el("larkSourcesButton").classList.toggle("hidden", !state.adminMode);
   el("userManagementButton").classList.toggle("hidden", !state.adminMode || !superAdmin);
   el("downloadMyDataButton").classList.toggle("hidden", state.authRole !== "requester");
   el("workspaceModeButton").classList.toggle("hidden", !hasAdminCapability());
@@ -1186,7 +1219,7 @@ async function loadData() {
 
 async function loadFieldPreferences() {
   const result = await fetchJson("/api/preferences/fields");
-  state.fieldPreferences = result.preferences || { hiddenFields: [], fieldOrder: [] };
+  state.fieldPreferences = result.preferences || { hiddenFields: [], fieldOrder: [], pinnedFields: ["项目名称"] };
 }
 
 async function openUserManagement() {
@@ -1239,35 +1272,131 @@ function fieldPreferenceOrder() {
   return [...configured, ...available.filter((field) => !configured.includes(field))];
 }
 
+function fieldSettingRow(field, visible) {
+  const pinned = visible && (state.fieldPreferences.pinnedFields || []).includes(field);
+  return `
+    <div class="field-setting-row ${pinned ? "is-pinned" : ""}" draggable="true"
+      data-field-setting="${escapeAttr(field)}" data-pinned="${pinned ? "true" : "false"}">
+      <button class="drag-handle" type="button" title="拖动排序" aria-label="拖动 ${escapeAttr(field)}">⋮⋮</button>
+      <span class="field-setting-name">${escapeHtml(field)}</span>
+      <div class="field-order-actions">
+        ${visible ? `<button class="icon-button mini-icon pin-field ${pinned ? "active" : ""}" type="button" data-pin-field title="${pinned ? "取消固定" : "固定词条"}" aria-label="${pinned ? "取消固定" : "固定"} ${escapeAttr(field)}">⌖</button>` : ""}
+        <button class="icon-button mini-icon" type="button" data-toggle-field="${visible ? "hidden" : "visible"}"
+          title="${visible ? "移到隐藏词条" : "移到显示词条"}" aria-label="${visible ? "隐藏" : "显示"} ${escapeAttr(field)}">${visible ? "→" : "←"}</button>
+      </div>
+    </div>`;
+}
+
 function renderFieldSettings() {
   const hidden = new Set(state.fieldPreferences.hiddenFields || []);
-  el("fieldSettingsList").innerHTML = fieldPreferenceOrder().map((field, index, all) => `
-    <div class="field-setting-row" data-field-setting="${escapeHtml(field)}">
-      <label><input type="checkbox" ${hidden.has(field) ? "" : "checked"} /><span>${escapeHtml(field)}</span></label>
-      <div class="field-order-actions">
-        <button class="icon-button mini-icon" type="button" data-move-field="-1" ${index === 0 ? "disabled" : ""} title="上移">↑</button>
-        <button class="icon-button mini-icon" type="button" data-move-field="1" ${index === all.length - 1 ? "disabled" : ""} title="下移">↓</button>
-      </div>
-    </div>`).join("");
+  const visibleFields = fieldPreferenceOrder().filter((field) => !hidden.has(field));
+  const hiddenFields = fieldPreferenceOrder().filter((field) => hidden.has(field));
+  el("visibleFieldSettings").innerHTML = visibleFields.map((field) => fieldSettingRow(field, true)).join("")
+    || `<div class="field-drop-empty">把需要显示的词条拖到这里</div>`;
+  el("hiddenFieldSettings").innerHTML = hiddenFields.map((field) => fieldSettingRow(field, false)).join("")
+    || `<div class="field-drop-empty">暂无隐藏词条</div>`;
+  el("visibleFieldCount").textContent = visibleFields.length;
+  el("hiddenFieldCount").textContent = hiddenFields.length;
 }
 
 function openFieldSettings() {
+  state.fieldPreferencesBackup = {
+    hiddenFields: [...(state.fieldPreferences.hiddenFields || [])],
+    fieldOrder: [...(state.fieldPreferences.fieldOrder || [])],
+    pinnedFields: [...(state.fieldPreferences.pinnedFields || [])]
+  };
+  state.fieldPreferences = {
+    hiddenFields: [...(state.fieldPreferences.hiddenFields || [])],
+    fieldOrder: [...fieldPreferenceOrder()],
+    pinnedFields: [...(state.fieldPreferences.pinnedFields || [])]
+  };
   renderFieldSettings();
   el("fieldSettingsDialog").showModal();
 }
 
+function captureFieldSettings() {
+  const visible = [...el("visibleFieldSettings").querySelectorAll("[data-field-setting]")].map((row) => row.dataset.fieldSetting);
+  const hidden = [...el("hiddenFieldSettings").querySelectorAll("[data-field-setting]")].map((row) => row.dataset.fieldSetting);
+  const pinned = [...el("visibleFieldSettings").querySelectorAll('[data-field-setting][data-pinned="true"]')]
+    .map((row) => row.dataset.fieldSetting)
+    .slice(0, 4);
+  state.fieldPreferences = {
+    hiddenFields: hidden,
+    fieldOrder: [...visible, ...hidden],
+    pinnedFields: pinned
+  };
+}
+
 async function saveFieldSettings() {
-  const rows = [...el("fieldSettingsList").querySelectorAll("[data-field-setting]")];
-  const fieldOrder = rows.map((row) => row.dataset.fieldSetting);
-  const hiddenFields = rows.filter((row) => !row.querySelector("input").checked).map((row) => row.dataset.fieldSetting);
+  captureFieldSettings();
   const result = await fetchJson("/api/preferences/fields", {
     method: "PATCH",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ hiddenFields, fieldOrder })
+    body: JSON.stringify(state.fieldPreferences)
   });
   state.fieldPreferences = result.preferences;
+  state.fieldPreferencesBackup = null;
   el("fieldSettingsDialog").close();
   renderWorkspace();
+}
+
+function cancelFieldSettings() {
+  if (state.fieldPreferencesBackup) {
+    state.fieldPreferences = state.fieldPreferencesBackup;
+    state.fieldPreferencesBackup = null;
+  }
+  state.draggedField = "";
+  el("fieldSettingsDialog").close();
+}
+
+function safeExternalUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    return ["https:", "http:"].includes(url.protocol) ? url.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
+async function openLarkSources() {
+  const result = await fetchJson("/api/sync/lark/sources");
+  state.larkSources = result.sources || [];
+  state.larkSyncIntervalMs = Number(result.intervalMs || 300000);
+  const minutes = Math.max(1, Math.round(state.larkSyncIntervalMs / 60000));
+  el("larkSourcesHint").textContent = `服务启动后立即同步，之后每 ${minutes} 分钟自动增量同步；“刷新”只重新读取数据库。`;
+  el("larkSourcesList").innerHTML = state.larkSources.map((source) => {
+    const url = safeExternalUrl(source.url);
+    return `
+      <article class="lark-source-row">
+        <div>
+          <strong>${escapeHtml(source.source)}</strong>
+          <span>${source.configured ? escapeHtml(source.tableId) : "尚未配置 table_id"}${source.viewId ? ` · ${escapeHtml(source.viewId)}` : ""}</span>
+        </div>
+        <div class="lark-source-actions">
+          <span class="source-state ${source.configured ? "ready" : "missing"}">${source.configured ? "已接入同步" : "待配置"}</span>
+          ${url ? `<a class="button mini" href="${escapeAttr(url)}" target="_blank" rel="noreferrer">打开在线表格</a>` : `<button class="button mini" type="button" disabled>未配置链接</button>`}
+        </div>
+      </article>`;
+  }).join("");
+  el("syncLarkNow").classList.toggle("hidden", !isSuperAdmin());
+  el("larkSourcesDialog").showModal();
+}
+
+async function syncLarkNow() {
+  const button = el("syncLarkNow");
+  button.disabled = true;
+  button.textContent = "同步中…";
+  try {
+    const result = await fetchJson("/api/sync/lark", { method: "POST" });
+    const changed = (result.results || []).reduce((sum, item) => sum + Number(item.batch?.inserted || 0) + Number(item.batch?.updated || 0), 0);
+    button.textContent = `已同步 ${changed} 条变更`;
+    await loadData();
+  } finally {
+    setTimeout(() => {
+      button.disabled = false;
+      button.textContent = "立即同步";
+    }, 1200);
+  }
 }
 
 function openImportDialog() {
@@ -1376,7 +1505,7 @@ function applyUser(user, preferredMode = "") {
     state.requesterName = "";
     return;
   }
-  const useAdminMode = hasAdminCapability(user) && preferredMode !== "requester";
+  const useAdminMode = hasAdminCapability(user) && preferredMode === "admin";
   state.authRole = useAdminMode ? "admin" : "requester";
   state.adminMode = state.authRole === "admin";
   state.requesterName = user.name;
@@ -1400,6 +1529,7 @@ async function loadSession() {
 
 async function logout() {
   await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
+  window.history.replaceState({}, "", "/");
   state.adminMode = false;
   state.adminToken = "";
   state.authRole = "";
@@ -1710,6 +1840,7 @@ el("refreshButton").addEventListener("click", loadData);
 el("importButton").addEventListener("click", openImportDialog);
 el("addRecordButton").addEventListener("click", () => openRecordDialog());
 el("fieldSettingsButton").addEventListener("click", openFieldSettings);
+el("larkSourcesButton").addEventListener("click", () => openLarkSources().catch((error) => alert(error.message)));
 el("userManagementButton").addEventListener("click", () => openUserManagement().catch((error) => alert(error.message)));
 el("downloadMyDataButton").addEventListener("click", () => {
   window.location.href = "/api/my-records/export";
@@ -1891,26 +2022,75 @@ el("recordForm").addEventListener("submit", async (event) => {
     alert(error.message);
   }
 });
-el("closeFieldSettingsDialog").addEventListener("click", () => el("fieldSettingsDialog").close());
-el("cancelFieldSettings").addEventListener("click", () => el("fieldSettingsDialog").close());
+el("closeFieldSettingsDialog").addEventListener("click", cancelFieldSettings);
+el("cancelFieldSettings").addEventListener("click", cancelFieldSettings);
 el("saveFieldSettings").addEventListener("click", () => saveFieldSettings().catch((error) => alert(error.message)));
 el("fieldSettingsList").addEventListener("click", (event) => {
-  const button = event.target.closest("button[data-move-field]");
-  if (!button) return;
-  const row = button.closest("[data-field-setting]");
-  const sibling = Number(button.dataset.moveField) < 0 ? row.previousElementSibling : row.nextElementSibling;
-  if (!sibling) return;
-  if (Number(button.dataset.moveField) < 0) row.parentElement.insertBefore(row, sibling);
-  else row.parentElement.insertBefore(sibling, row);
-  const hiddenFields = [...el("fieldSettingsList").querySelectorAll("[data-field-setting]")]
-    .filter((item) => !item.querySelector("input").checked)
-    .map((item) => item.dataset.fieldSetting);
-  state.fieldPreferences = {
-    hiddenFields,
-    fieldOrder: [...el("fieldSettingsList").querySelectorAll("[data-field-setting]")].map((item) => item.dataset.fieldSetting)
-  };
+  const row = event.target.closest("[data-field-setting]");
+  if (!row) return;
+  const targetZone = event.target.closest("button[data-toggle-field]")?.dataset.toggleField;
+  if (targetZone) {
+    if (targetZone === "hidden") row.dataset.pinned = "false";
+    el(targetZone === "hidden" ? "hiddenFieldSettings" : "visibleFieldSettings").appendChild(row);
+    captureFieldSettings();
+    renderFieldSettings();
+    return;
+  }
+  if (event.target.closest("button[data-pin-field]")) {
+    captureFieldSettings();
+    const pinned = new Set(state.fieldPreferences.pinnedFields || []);
+    if (pinned.has(row.dataset.fieldSetting)) pinned.delete(row.dataset.fieldSetting);
+    else {
+      if (pinned.size >= 4) {
+        alert("最多固定 4 个词条");
+        return;
+      }
+      pinned.add(row.dataset.fieldSetting);
+    }
+    state.fieldPreferences.pinnedFields = [...pinned];
+    renderFieldSettings();
+  }
+});
+el("fieldSettingsList").addEventListener("dragstart", (event) => {
+  const row = event.target.closest("[data-field-setting]");
+  if (!row) return;
+  state.draggedField = row.dataset.fieldSetting;
+  row.classList.add("dragging");
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", state.draggedField);
+  }
+});
+el("fieldSettingsList").addEventListener("dragover", (event) => {
+  const zone = event.target.closest("[data-field-zone]");
+  if (!zone || !state.draggedField) return;
+  event.preventDefault();
+  const row = el("fieldSettingsList").querySelector(`[data-field-setting="${CSS.escape(state.draggedField)}"]`);
+  if (!row) return;
+  const target = event.target.closest("[data-field-setting]");
+  if (target === row) return;
+  if (!target) zone.appendChild(row);
+  else {
+    const rect = target.getBoundingClientRect();
+    zone.insertBefore(row, event.clientY < rect.top + rect.height / 2 ? target : target.nextElementSibling);
+  }
+  if (zone.dataset.fieldZone === "hidden") row.dataset.pinned = "false";
+});
+el("fieldSettingsList").addEventListener("drop", (event) => {
+  if (!event.target.closest("[data-field-zone]")) return;
+  event.preventDefault();
+  captureFieldSettings();
+  state.draggedField = "";
   renderFieldSettings();
 });
+el("fieldSettingsList").addEventListener("dragend", () => {
+  if (state.draggedField) captureFieldSettings();
+  state.draggedField = "";
+  renderFieldSettings();
+});
+el("closeLarkSourcesDialog").addEventListener("click", () => el("larkSourcesDialog").close());
+el("cancelLarkSources").addEventListener("click", () => el("larkSourcesDialog").close());
+el("syncLarkNow").addEventListener("click", () => syncLarkNow().catch((error) => alert(error.message)));
 el("closeExcelImportDialog").addEventListener("click", () => el("excelImportDialog").close());
 el("cancelExcelImport").addEventListener("click", () => el("excelImportDialog").close());
 el("previewExcelImport").addEventListener("click", () => previewExcelImport().catch((error) => alert(error.message)));
@@ -1962,7 +2142,7 @@ el("adminForm").addEventListener("submit", async (event) => {
     return;
   }
   state.adminToken = result.token;
-  applyUser(result.user || { name: "超级管理员", role: "super_admin" });
+  applyUser(result.user || { name: "超级管理员", role: "super_admin" }, "admin");
   state.activeView = "ledger";
   state.publicRecords = [];
   state.suggestionRecords = [];

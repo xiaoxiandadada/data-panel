@@ -6,6 +6,7 @@ import { isCompletedStatus } from "../dist/server/metrics/satisfaction.service.j
 import { demandToLedgerFields, requesterRecords } from "../dist/server/core/ledger-utils.js";
 import { hasAdminRole, normalizeUserRoles, primaryUserRole } from "../dist/server/core/user-roles.js";
 import { LarkOAuthService } from "../dist/server/auth/lark-oauth.service.js";
+import { LarkBaseSyncService } from "../dist/server/sync/lark-base-sync.service.js";
 
 function dataset(rows) {
   const names = [...new Set(rows.flatMap((row) => Object.keys(row)))];
@@ -76,6 +77,85 @@ test("administrator roles always retain requester capability", () => {
   const user = { openId: "ou_test", name: "管理员", email: "", department: "", role: primaryUserRole(roles), roles };
   assert.deepEqual(roles, ["delivery_admin", "requester"]);
   assert.equal(hasAdminRole(user), true);
+});
+
+test("three Feishu tables expose stable online links and sync in authority order", () => {
+  const keys = [
+    "LARK_BASE_WEB_URL",
+    "LARK_REQUEST_TABLE_ID",
+    "LARK_REQUEST_VIEW_ID",
+    "LARK_DATA_TEAM_TABLE_ID",
+    "LARK_DATA_TEAM_VIEW_ID",
+    "LARK_LEDGER_TABLE_ID",
+    "LARK_LEDGER_VIEW_ID"
+  ];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  Object.assign(process.env, {
+    LARK_BASE_WEB_URL: "https://example.feishu.cn/wiki/base-node",
+    LARK_REQUEST_TABLE_ID: "request-table",
+    LARK_REQUEST_VIEW_ID: "request-view",
+    LARK_DATA_TEAM_TABLE_ID: "team-table",
+    LARK_DATA_TEAM_VIEW_ID: "team-view",
+    LARK_LEDGER_TABLE_ID: "ledger-table",
+    LARK_LEDGER_VIEW_ID: "ledger-view"
+  });
+  try {
+    const service = new LarkBaseSyncService({}, {}, {});
+    const sources = service.sourceConfigurations();
+    assert.deepEqual(sources.map((source) => source.key), ["request", "data-team", "ledger"]);
+    assert.equal(sources.every((source) => source.configured), true);
+    assert.equal(sources[0].url, "https://example.feishu.cn/wiki/base-node?table=request-table&view=request-view");
+    assert.equal(sources[2].url, "https://example.feishu.cn/wiki/base-node?table=ledger-table&view=ledger-view");
+  } finally {
+    for (const key of keys) {
+      if (previous[key] == null) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+});
+
+test("three Feishu tables merge in request, data-team, ledger order", async () => {
+  const keys = [
+    "LARK_BASE_TOKEN",
+    "LARK_REQUEST_TABLE_ID",
+    "LARK_DATA_TEAM_TABLE_ID",
+    "LARK_LEDGER_TABLE_ID"
+  ];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  Object.assign(process.env, {
+    LARK_BASE_TOKEN: "base-token",
+    LARK_REQUEST_TABLE_ID: "request-table",
+    LARK_DATA_TEAM_TABLE_ID: "team-table",
+    LARK_LEDGER_TABLE_ID: "ledger-table"
+  });
+  let stored = dataset([]);
+  const reads = [];
+  const service = new LarkBaseSyncService(
+    {
+      readDataset: async () => stored,
+      saveDataset: async (next) => { stored = next; },
+      appendImportBatch: async () => {}
+    },
+    {
+      isBotConfigured: () => true,
+      listBaseDataset: async (_appToken, tableId) => {
+        reads.push(tableId);
+        return dataset([{ "任务代码": "PJ-001", "项目名称": "Alpha", "获取状态": tableId }]);
+      }
+    },
+    { enqueue: async () => {} }
+  );
+  try {
+    const results = await service.syncAll("测试");
+    assert.deepEqual(reads, ["request-table", "team-table", "ledger-table"]);
+    assert.deepEqual(results.map((item) => item.source), ["提需求表", "数据团队总表", "总台账"]);
+    assert.equal(stored.records[0].fields["获取状态"], "ledger-table");
+  } finally {
+    for (const key of keys) {
+      if (previous[key] == null) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
 });
 
 test("Feishu client reads Base records and sends bot messages through OpenAPI", async () => {

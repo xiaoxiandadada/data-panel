@@ -275,7 +275,7 @@ export class LedgerStoreService implements OnModuleInit {
   }
 
   async readUserFieldPreferences(openId: string): Promise<UserFieldPreferences> {
-    const fallback: UserFieldPreferences = { openId, hiddenFields: [], fieldOrder: [], updatedAt: "" };
+    const fallback: UserFieldPreferences = { openId, hiddenFields: [], fieldOrder: [], pinnedFields: ["项目名称"], updatedAt: "" };
     if (this.mongoReady && this.db) {
       const stored = await this.userFieldPreferences().findOne({ openId }, { projection: { _id: 0 } });
       return stored ? { ...fallback, ...stored } as UserFieldPreferences : fallback;
@@ -289,6 +289,7 @@ export class LedgerStoreService implements OnModuleInit {
       openId: preferences.openId,
       hiddenFields: [...new Set(preferences.hiddenFields || [])],
       fieldOrder: [...new Set(preferences.fieldOrder || [])],
+      pinnedFields: [...new Set(preferences.pinnedFields || [])].filter((field) => !(preferences.hiddenFields || []).includes(field)).slice(0, 4),
       updatedAt: new Date().toISOString()
     };
     if (this.mongoReady && this.db) {

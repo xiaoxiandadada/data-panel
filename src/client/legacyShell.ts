@@ -31,6 +31,7 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
           <button id="workspaceModeButton" class="button hidden" type="button">切换到我的需求</button>
           <button id="modeButton" class="button" type="button">管理员登录</button>
           <button id="fieldSettingsButton" class="button admin-only hidden" type="button">自定义词条</button>
+          <button id="larkSourcesButton" class="button admin-only hidden" type="button">飞书数据源</button>
           <button id="userManagementButton" class="button admin-only hidden" type="button">权限管理</button>
           <button id="addRecordButton" class="button admin-only hidden" type="button">添加数据</button>
           <button id="importButton" class="button primary admin-only hidden" type="button">上传 Excel</button>
@@ -260,6 +261,7 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
             <label>
               <span>数据来源</span>
               <select id="excelImportSource">
+                <option value="request">提需求表</option>
                 <option value="ledger">总台账</option>
                 <option value="data-team">数据团队总表</option>
               </select>
@@ -278,19 +280,45 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
         </form>
       </dialog>
 
-      <dialog id="fieldSettingsDialog" class="admin-dialog field-settings-dialog">
+      <dialog id="fieldSettingsDialog" class="admin-dialog field-settings-dialog wide-dialog">
         <div>
           <div class="dialog-head">
             <div>
               <h2>自定义词条</h2>
-              <p>勾选需要显示的字段，并调整顺序；设置仅对当前管理员生效。</p>
+              <p>在显示与隐藏区域之间拖动词条；显示区可调整顺序，并最多固定 4 个常用词条。</p>
             </div>
             <button id="closeFieldSettingsDialog" class="icon-button" type="button" title="关闭">×</button>
           </div>
-          <div id="fieldSettingsList" class="field-settings-list"></div>
+          <div id="fieldSettingsList" class="field-settings-board">
+            <section class="field-settings-column">
+              <header><div><strong>显示词条</strong><span>按当前顺序显示</span></div><b id="visibleFieldCount">0</b></header>
+              <div id="visibleFieldSettings" class="field-drop-zone" data-field-zone="visible"></div>
+            </section>
+            <section class="field-settings-column">
+              <header><div><strong>隐藏词条</strong><span>拖回左侧即可恢复</span></div><b id="hiddenFieldCount">0</b></header>
+              <div id="hiddenFieldSettings" class="field-drop-zone" data-field-zone="hidden"></div>
+            </section>
+          </div>
           <div class="dialog-actions">
             <button class="button" type="button" id="cancelFieldSettings">取消</button>
             <button class="button primary" type="button" id="saveFieldSettings">保存设置</button>
+          </div>
+        </div>
+      </dialog>
+
+      <dialog id="larkSourcesDialog" class="admin-dialog wide-dialog">
+        <div>
+          <div class="dialog-head">
+            <div>
+              <h2>飞书在线数据源</h2>
+              <p id="larkSourcesHint">服务启动后立即同步，之后按配置间隔自动增量同步。</p>
+            </div>
+            <button id="closeLarkSourcesDialog" class="icon-button" type="button" title="关闭">×</button>
+          </div>
+          <div id="larkSourcesList" class="lark-sources-list"></div>
+          <div class="dialog-actions">
+            <button class="button" type="button" id="cancelLarkSources">关闭</button>
+            <button class="button primary" type="button" id="syncLarkNow">立即同步</button>
           </div>
         </div>
       </dialog>

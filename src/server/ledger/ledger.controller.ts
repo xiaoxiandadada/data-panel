@@ -180,6 +180,7 @@ export class LedgerController {
       });
       return;
     }
+    this.clearSessionCookie(response);
     response.redirect(this.larkOAuth.authorizationUrl(this.auth.signOAuthState(next, adminOnly === "1")));
   }
 
@@ -199,6 +200,7 @@ export class LedgerController {
       await this.store.upsertUser(user);
       const sessionUser = await this.store.findUserByOpenId(user.openId) || user;
       if (verifiedState.adminOnly && !this.auth.isAdminUser(sessionUser)) {
+        this.clearSessionCookie(response);
         response.redirect(`${verifiedState.next}${verifiedState.next.includes("?") ? "&" : "?"}auth_error=admin_only`);
         return;
       }
@@ -383,6 +385,16 @@ export class LedgerController {
     return { ok: true, results: await this.larkSync.syncAll(user?.name || "超级管理员") };
   }
 
+  @Get("api/sync/lark/sources")
+  async larkSyncSources(@Req() request: Request, @Headers("x-admin-token") token?: string) {
+    this.requireAdminUser(request, token);
+    return {
+      ok: true,
+      intervalMs: Math.max(Number(process.env.LARK_SYNC_INTERVAL_MS || 300_000), 60_000),
+      sources: this.larkSync.sourceConfigurations()
+    };
+  }
+
   @Get("api/preferences/fields")
   async fieldPreferences(@Req() request: Request, @Headers("x-admin-token") token?: string) {
     const user = this.requireAdminUser(request, token);
@@ -398,16 +410,21 @@ export class LedgerController {
   async updateFieldPreferences(
     @Req() request: Request,
     @Headers("x-admin-token") token: string | undefined,
-    @Body() payload: { hiddenFields?: string[]; fieldOrder?: string[] }
+    @Body() payload: { hiddenFields?: string[]; fieldOrder?: string[]; pinnedFields?: string[] }
   ) {
     const user = this.requireAdminUser(request, token);
     const dataset = projectDatasetForAdmin(await this.store.readDataset(), user);
     const allowed = new Set(dataset.fields.map((field) => field.name || field.id));
     const hiddenFields = (payload.hiddenFields || []).map(String).filter((field) => allowed.has(field));
     const fieldOrder = (payload.fieldOrder || []).map(String).filter((field) => allowed.has(field));
+    const hidden = new Set(hiddenFields);
+    const pinnedFields = (payload.pinnedFields || [])
+      .map(String)
+      .filter((field) => allowed.has(field) && !hidden.has(field))
+      .slice(0, 4);
     return {
       ok: true,
-      preferences: await this.store.saveUserFieldPreferences({ openId: user.openId, hiddenFields, fieldOrder, updatedAt: "" })
+      preferences: await this.store.saveUserFieldPreferences({ openId: user.openId, hiddenFields, fieldOrder, pinnedFields, updatedAt: "" })
     };
   }
 
@@ -555,6 +572,10 @@ export class LedgerController {
     response.setHeader("Set-Cookie", `${this.auth.sessionCookieName}=${encodeURIComponent(token)}; ${this.auth.cookieOptions()}`);
   }
 
+  private clearSessionCookie(response: Response) {
+    response.setHeader("Set-Cookie", `${this.auth.sessionCookieName}=; ${this.auth.clearCookieOptions()}`);
+  }
+
   private readRawBody(request: Request): Promise<string> {
     return this.readRawBuffer(request).then((buffer) => buffer.toString("utf8"));
   }
@@ -581,6 +602,7 @@ export class LedgerController {
   private importSource(source: string | undefined): string {
     const normalized = String(source || "总台账").trim().toLowerCase();
     if (["data-team", "team", "数据团队总表"].includes(normalized)) return "数据团队总表";
+    if (["request", "requests", "提需求表"].includes(normalized)) return "提需求表";
     if (["ledger", "总台账"].includes(normalized)) return "总台账";
     return String(source || "总台账").trim().slice(0, 40) || "总台账";
   }

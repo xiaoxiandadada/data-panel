@@ -55,6 +55,7 @@ export interface UserFieldPreferences {
   openId: string;
   hiddenFields: string[];
   fieldOrder: string[];
+  pinnedFields: string[];
   updatedAt: string;
 }
 
