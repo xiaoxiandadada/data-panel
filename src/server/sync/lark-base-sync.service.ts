@@ -1,10 +1,11 @@
 import { Injectable, OnApplicationBootstrap, OnModuleDestroy } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import { LarkOAuthService } from "../auth/lark-oauth.service.js";
-import type { ImportBatch } from "../core/types.js";
+import { stringifyCell } from "../core/ledger-utils.js";
+import type { ImportBatch, LedgerRecord } from "../core/types.js";
 import { LedgerStoreService } from "../infra/ledger-store.service.js";
 import { QueueService } from "../infra/queue.service.js";
-import { mergeImportedDataset } from "../ledger/parse-utils.js";
+import { importBusinessKey, mergeImportedDataset } from "../ledger/parse-utils.js";
 
 export interface LarkSyncResult {
   source: string;
@@ -172,6 +173,8 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
     try {
       const appToken = await this.baseAppToken();
       const results: LarkSyncResult[] = [];
+      const initialDataset = await this.store.readDataset();
+      const notifyStatusChanges = initialDataset.records.length > 0;
       for (const source of sources) {
         const incoming = await this.lark.listBaseDataset(appToken, source.tableId, source.viewId);
         const existing = await this.store.readDataset();
@@ -187,6 +190,9 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
         };
         await this.store.saveDataset(merged.dataset);
         await this.store.appendImportBatch(batch);
+        if (notifyStatusChanges) {
+          await this.enqueueStatusChanges(existing.records, merged.dataset.records, incoming.records, source.source);
+        }
         await this.queue.enqueue("dataset.synced", { source: source.source, count: incoming.records.length });
         results.push({ source: source.source, tableId: source.tableId, batch });
       }
@@ -198,6 +204,33 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
       throw error;
     } finally {
       this.syncing = false;
+    }
+  }
+
+  private async enqueueStatusChanges(
+    beforeRecords: LedgerRecord[],
+    afterRecords: LedgerRecord[],
+    incomingRecords: LedgerRecord[],
+    source: string
+  ): Promise<void> {
+    const beforeByKey = new Map(beforeRecords.map((record) => [importBusinessKey(record.fields || {}), record]));
+    const afterByKey = new Map(afterRecords.map((record) => [importBusinessKey(record.fields || {}), record]));
+    const changedKeys = new Set((incomingRecords || []).map((record) => importBusinessKey(record.fields || {})));
+
+    for (const key of changedKeys) {
+      const before = beforeByKey.get(key);
+      const after = afterByKey.get(key);
+      if (!before || !after) continue;
+      const beforeStatus = stringifyCell(before.fields?.["获取状态"]).trim();
+      const afterStatus = stringifyCell(after.fields?.["获取状态"]).trim();
+      if (beforeStatus === afterStatus) continue;
+      await this.queue.enqueue("record.updated", {
+        recordId: after.record_id,
+        fields: ["获取状态"],
+        beforeStatus: beforeStatus || "未设置",
+        afterStatus: afterStatus || "未设置",
+        source
+      });
     }
   }
 

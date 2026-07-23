@@ -39,7 +39,7 @@ export interface LedgerLog {
   createdAt: string;
 }
 
-export type UserRole = "requester" | "delivery_admin" | "super_admin";
+export type UserRole = "member" | "requester" | "delivery_admin" | "super_admin";
 
 export interface AppUser {
   openId: string;
@@ -49,6 +49,7 @@ export interface AppUser {
   department: string;
   role: UserRole;
   roles?: UserRole[];
+  requesterRegistered?: boolean;
 }
 
 export interface UserFieldPreferences {

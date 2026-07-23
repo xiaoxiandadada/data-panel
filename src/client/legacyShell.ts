@@ -36,7 +36,7 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
           <button id="modeButton" class="button" type="button">管理员登录</button>
           <button id="fieldSettingsButton" class="button admin-only hidden" type="button">自定义词条</button>
           <button id="larkSourcesButton" class="button admin-only hidden" type="button">飞书数据源</button>
-          <button id="userManagementButton" class="button admin-only hidden" type="button">管理员审批</button>
+          <button id="userManagementButton" class="button admin-only hidden" type="button">管理员设置</button>
           <button id="addRecordButton" class="button admin-only hidden" type="button">去飞书添加</button>
           <button id="importButton" class="button primary admin-only hidden" type="button">上传 Excel</button>
           <button id="refreshButton" class="button admin-only" type="button">刷新</button>
@@ -89,7 +89,7 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
             </button>
             <button id="adminLoginButton" class="login-entry" type="button">
               <span>管理员登录</span>
-              <small>维护台账与负责人视图</small>
+              <small>维护交付台账</small>
             </button>
           </div>
         </div>
@@ -99,8 +99,6 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
 
       <nav id="adminTabs" class="view-tabs admin-only" aria-label="管理员视图">
         <button class="view-tab active" type="button" data-view="ledger">管理员台账</button>
-        <button class="view-tab" type="button" data-view="owners">负责人视图</button>
-        <button class="view-tab" type="button" data-view="analytics">效率分析</button>
       </nav>
 
       <section id="requesterSection" class="requester-section hidden" aria-label="需求方进展">
@@ -221,29 +219,6 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
         <div id="records" class="records table-wrap"></div>
       </section>
 
-      <section id="ownerViewSection" class="owner-view-section hidden" aria-label="负责人视图">
-        <div class="section-head">
-          <div>
-            <h2>负责人视图</h2>
-            <p>按字段负责人与管理员角色拆分长表格，每个视图只放当前角色需要维护的词条。</p>
-          </div>
-          <span id="ownerViewCount" class="muted-label">0 组</span>
-        </div>
-        <div id="ownerTabs" class="role-tabs"></div>
-        <div id="ownerFieldChips" class="field-chips"></div>
-        <div id="ownerRecords" class="records table-wrap"></div>
-      </section>
-
-      <section id="analyticsSection" class="analytics-section hidden" aria-label="效率分析">
-        <div class="section-head">
-          <div>
-            <h2>交付效率分析</h2>
-            <p>围绕方案处理、首次全量交付、验收完成等节点统计交付周期。</p>
-          </div>
-        </div>
-        <div id="analyticsCards" class="analytics-cards"></div>
-      </section>
-
       <dialog id="recordDialog" class="record-dialog">
         <form id="recordForm" method="dialog">
           <div class="dialog-head">
@@ -298,7 +273,7 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
           <div class="dialog-head">
             <div>
               <h2>自定义词条</h2>
-              <p>在显示与隐藏区域之间拖动词条；显示区可调整顺序，并最多固定 4 个常用词条。</p>
+              <p>拖动调整列顺序或显示状态；最多固定 4 列，设置仅对当前管理员生效。</p>
             </div>
             <button id="closeFieldSettingsDialog" class="icon-button" type="button" title="关闭">×</button>
           </div>
@@ -340,15 +315,15 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
         <div>
           <div class="dialog-head">
             <div>
-              <h2>管理员审批</h2>
-              <p>仅超级管理员可以任命或撤销交付管理员；成员始终保留需求方身份。</p>
+              <h2>管理员设置</h2>
+              <p>仅超级管理员可以从飞书通讯录任命管理员；需求方身份由成员从需求方入口登录后单独建立。</p>
             </div>
             <button id="closeUserManagementDialog" class="icon-button" type="button" title="关闭">×</button>
           </div>
           <div class="user-management-toolbar">
             <label>
-              <span>查找企业成员</span>
-              <input id="userManagementSearch" type="search" placeholder="输入姓名、部门或邮箱" autocomplete="off" />
+              <span>添加管理员</span>
+              <input id="userManagementSearch" type="search" placeholder="输入姓名，在飞书通讯录中查找" autocomplete="off" />
             </label>
             <span id="userManagementSummary" class="muted-label">0 位成员</span>
           </div>

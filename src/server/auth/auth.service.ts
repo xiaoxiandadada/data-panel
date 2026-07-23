@@ -6,6 +6,7 @@ import { hasAdminRole, hasUserRole, normalizeUserRoles, primaryUserRole, rolesFo
 interface TokenPayload {
   role: "admin" | UserRole;
   exp: number;
+  ver: number;
   user?: AppUser;
 }
 
@@ -32,9 +33,9 @@ export class AuthService {
   private readonly sessionMaxAgeSeconds = 8 * 60 * 60;
 
   private readonly mockUsers: AppUser[] = [
-    { openId: "mock_wang-guanchu", name: "王冠楚", email: "wangguanchu@example.local", department: "安全可信AGI", role: "requester", roles: ["requester"] },
-    { openId: "mock_gu-yuying", name: "顾语莺", email: "guyuying@example.local", department: "数据平台中心", role: "delivery_admin", roles: ["requester", "delivery_admin"] },
-    { openId: "mock_super-admin", name: "超级管理员", email: "super@example.local", department: "管理", role: "super_admin", roles: ["requester", "super_admin"] }
+    { openId: "mock_wang-guanchu", name: "王冠楚", email: "wangguanchu@example.local", department: "安全可信AGI", role: "requester", roles: ["requester"], requesterRegistered: true },
+    { openId: "mock_gu-yuying", name: "顾语莺", email: "guyuying@example.local", department: "数据平台中心", role: "delivery_admin", roles: ["delivery_admin"], requesterRegistered: false },
+    { openId: "mock_super-admin", name: "超级管理员", email: "super@example.local", department: "管理", role: "super_admin", roles: ["super_admin"], requesterRegistered: false }
   ];
 
   login(password: string): { ok: true; token: string; user: AppUser } | { ok: false; message: string } {
@@ -45,6 +46,7 @@ export class AuthService {
     const payload: TokenPayload = {
       role: "super_admin",
       user,
+      ver: 2,
       exp: this.expiresAt()
     };
     return { ok: true, token: this.sign(payload), user };
@@ -75,6 +77,7 @@ export class AuthService {
     return this.sign({
       role: user.role,
       user,
+      ver: 2,
       exp: this.expiresAt()
     });
   }
@@ -92,14 +95,18 @@ export class AuthService {
       email: `${normalizeOpenId(cleanName)}@example.local`,
       department: options.department?.trim() || "未设置",
       role,
-      roles: requestedRoles
+      roles: requestedRoles,
+      requesterRegistered: requestedRoles.includes("requester")
     };
-    return { ok: true, token: this.tokenForUser(user), user };
+    const sessionUser = requestedRoles.includes("requester")
+      ? { ...user, requesterRegistered: true }
+      : user;
+    return { ok: true, token: this.tokenForUser(sessionUser), user: sessionUser };
   }
 
   verifyToken(token: string | undefined): AppUser | null {
     const payload = this.verifySignedPayload<TokenPayload>(token);
-    if (!payload) return null;
+    if (!payload || payload.ver !== 2) return null;
     if (payload.user) return payload.user;
     if (payload.role === "admin") return this.mockUsers.find((item) => item.role === "super_admin") || null;
     return null;

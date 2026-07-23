@@ -104,14 +104,14 @@ export class LedgerController {
   @Get("api/my-records")
   async myRecords(@Req() request: Request) {
     const dataset = await this.store.readDataset();
-    const user = this.requireUser(request);
+    const user = this.requireRequester(request);
     return publicDataset(dataset, requesterRecords(dataset, user.name));
   }
 
   @Get("api/my-records/export")
   async exportMyRecords(@Req() request: Request, @Res() response: Response) {
     const dataset = await this.store.readDataset();
-    const user = this.requireUser(request);
+    const user = this.requireRequester(request);
     const records = requesterRecords(dataset, user.name);
     const exported = publicDataset(dataset, records);
     response.setHeader("Content-Type", "text/csv; charset=utf-8");
@@ -158,7 +158,7 @@ export class LedgerController {
       throw new HttpException({ ok: false, message: "当前环境未开启模拟登录" }, HttpStatus.FORBIDDEN);
     }
     const result = this.auth.mockLogin(String(body?.name || ""), {
-      role: body?.role,
+      role: "requester",
       department: body?.department,
       register: Boolean(body?.register)
     });
@@ -196,7 +196,15 @@ export class LedgerController {
       return;
     }
     try {
-      const user = await this.larkOAuth.exchangeCodeForUser(code);
+      const user = await this.larkOAuth.exchangeCodeForUser(code, !verifiedState.adminOnly);
+      if (verifiedState.adminOnly && !this.auth.isAdminUser(user)) {
+        const configured = await this.store.findUserByOpenId(user.openId);
+        if (!this.auth.isAdminUser(configured)) {
+          this.clearSessionCookie(response);
+          response.redirect(`${verifiedState.next}${verifiedState.next.includes("?") ? "&" : "?"}auth_error=admin_only`);
+          return;
+        }
+      }
       await this.store.upsertUser(user);
       const sessionUser = await this.store.findUserByOpenId(user.openId) || user;
       if (verifiedState.adminOnly && !this.auth.isAdminUser(sessionUser)) {
@@ -217,7 +225,7 @@ export class LedgerController {
   @Post("api/requests")
   @HttpCode(200)
   async submitRequest(@Req() request: Request, @Body() payload: Record<string, unknown>) {
-    const user = this.requireUser(request);
+    const user = this.requireRequester(request);
     const requesterName = user.name;
     const dataset = await this.store.readDataset();
     ensureFields(dataset, ["需求负责人", "需求人", "关注人", "PM"]);
@@ -249,7 +257,7 @@ export class LedgerController {
 
   @Patch("api/requests/:id/followers")
   async updateFollowers(@Req() request: Request, @Param("id") recordId: string, @Body() payload: { followers?: string }) {
-    const user = this.requireUser(request);
+    const user = this.requireRequester(request);
     const requesterName = user.name;
     const dataset = await this.store.readDataset();
     ensureFields(dataset, ["需求负责人", "需求人", "关注人", "PM"]);
@@ -283,7 +291,7 @@ export class LedgerController {
     @Param("id") recordId: string,
     @Body() payload: { score?: number; comment?: string }
   ) {
-    const user = this.requireUser(request);
+    const user = this.requireRequester(request);
     const score = Math.round(Number(payload.score || 0));
     if (score < 1 || score > 5) throw new HttpException({ ok: false, message: "满意度必须为 1 到 5 分" }, HttpStatus.BAD_REQUEST);
     const dataset = await this.store.readDataset();
@@ -462,7 +470,7 @@ export class LedgerController {
   @Get("api/admin/users")
   async adminUsers(@Req() request: Request, @Headers("x-admin-token") token?: string) {
     this.requireSuperAdmin(request, token);
-    return { ok: true, users: await this.store.listUsers() };
+    return { ok: true, users: (await this.store.listUsers()).filter((user) => this.auth.isAdminUser(user)) };
   }
 
   @Patch("api/admin/users/:openId/role")
@@ -470,16 +478,35 @@ export class LedgerController {
     @Req() request: Request,
     @Headers("x-admin-token") token: string | undefined,
     @Param("openId") openId: string,
-    @Body() payload: { role?: UserRole; roles?: UserRole[]; note?: string }
+    @Body() payload: {
+      role?: UserRole;
+      roles?: UserRole[];
+      note?: string;
+      user?: Pick<AppUser, "openId" | "name" | "email" | "department" | "avatar">
+    }
   ) {
     this.requireSuperAdmin(request, token);
     const actor = this.adminUser(request, token);
-    const allowed: UserRole[] = ["requester", "delivery_admin", "super_admin"];
+    const allowed: UserRole[] = ["member", "requester", "delivery_admin", "super_admin"];
     const roles = Array.isArray(payload.roles) ? payload.roles : payload.role ? [payload.role] : [];
     if (!roles.length || roles.some((role) => !allowed.includes(role))) {
       throw new HttpException({ ok: false, message: "不支持的角色" }, HttpStatus.BAD_REQUEST);
     }
-    const target = await this.store.findUserByOpenId(openId);
+    let target = await this.store.findUserByOpenId(openId);
+    if (!target && payload.user?.openId === openId) {
+      const seedRoles = roles.includes("delivery_admin") ? ["delivery_admin" as UserRole] : ["member" as UserRole];
+      await this.store.upsertUser({
+        openId,
+        name: String(payload.user.name || "未命名用户"),
+        email: String(payload.user.email || ""),
+        department: String(payload.user.department || "未设置"),
+        avatar: payload.user.avatar,
+        role: seedRoles[0],
+        roles: seedRoles,
+        requesterRegistered: false
+      });
+      target = await this.store.findUserByOpenId(openId);
+    }
     const targetIsSuperAdmin = this.auth.hasRole(target, "super_admin");
     if (roles.includes("super_admin") && !targetIsSuperAdmin) {
       throw new HttpException({ ok: false, message: "超级管理员仅通过部署环境配置，不支持在页面新增" }, HttpStatus.FORBIDDEN);
@@ -489,16 +516,16 @@ export class LedgerController {
     }
     const user = await this.store.updateUserRoles(openId, roles);
     if (!user) throw new HttpException({ ok: false, message: "用户不存在或数据库未连接" }, HttpStatus.NOT_FOUND);
-    const beforeRoles = target?.roles?.length ? target.roles : target?.role ? [target.role] : ["requester"];
+    const beforeRoles = target?.roles?.length ? target.roles : target?.role ? [target.role] : ["member"];
     await this.store.appendLog(createLog({
       record_id: `user:${openId}`,
-      type: roles.includes("delivery_admin") ? "管理员审批通过" : "管理员权限撤销",
+      type: roles.includes("delivery_admin") ? "管理员任命" : "管理员移除",
       field: "用户角色",
       before: beforeRoles.join("、"),
       after: roles.join("、"),
       actor: actor?.name || "超级管理员",
       role: "super_admin",
-      note: String(payload.note || "超级管理员通过权限管理页面操作").slice(0, 200)
+      note: String(payload.note || "超级管理员通过管理员设置页面操作").slice(0, 200)
     }));
     return { ok: true, user };
   }
@@ -546,7 +573,7 @@ export class LedgerController {
     const tracking = this.satisfaction.completionTrackingPatch(currentRecord.fields || {}, payload.fields || {});
     const updatedFields = { ...(payload.fields || {}), ...tracking };
     if (!canEditAdminFields(admin, payload.fields || {})) {
-      throw new HttpException({ ok: false, message: "只能维护分配给当前管理员的字段" }, HttpStatus.FORBIDDEN);
+      throw new HttpException({ ok: false, message: "当前账号没有台账编辑权限" }, HttpStatus.FORBIDDEN);
     }
     const { dataset, beforeFields, record } = await this.store.updateRecord(recordId, updatedFields);
     if (!record) throw new HttpException({ ok: false, message: "记录不存在" }, HttpStatus.NOT_FOUND);
@@ -575,6 +602,14 @@ export class LedgerController {
   private requireUser(request: Request): AppUser {
     const user = this.currentUser(request);
     if (!user) throw new HttpException({ ok: false, message: "请先使用飞书登录" }, HttpStatus.UNAUTHORIZED);
+    return user;
+  }
+
+  private requireRequester(request: Request): AppUser {
+    const user = this.requireUser(request);
+    if (!this.auth.hasRole(user, "requester")) {
+      throw new HttpException({ ok: false, message: "请先从需求方入口登录并建立需求方身份" }, HttpStatus.FORBIDDEN);
+    }
     return user;
   }
 

@@ -108,10 +108,10 @@ export class LarkOAuthService {
     return url.toString();
   }
 
-  async exchangeCodeForUser(code: string): Promise<AppUser> {
+  async exchangeCodeForUser(code: string, registerRequester = true): Promise<AppUser> {
     const accessToken = await this.exchangeCode(code);
     const profile = await this.fetchUserInfo(accessToken);
-    return this.toAppUser(profile);
+    return this.toAppUser(profile, registerRequester);
   }
 
   async searchUsers(query: string, limit = 10): Promise<LarkContactUser[]> {
@@ -318,10 +318,10 @@ export class LarkOAuthService {
     return payload.data;
   }
 
-  private toAppUser(profile: NonNullable<LarkUserInfoResponse["data"]>): AppUser {
+  private toAppUser(profile: NonNullable<LarkUserInfoResponse["data"]>, registerRequester: boolean): AppUser {
     const name = cleanEnv(profile.name) || cleanEnv(profile.en_name) || cleanEnv(profile.email) || profile.open_id || "飞书用户";
     const email = cleanEnv(profile.email);
-    const roles = this.resolveRoles(profile);
+    const roles = this.resolveRoles(profile, registerRequester);
     return {
       openId: profile.open_id || profile.union_id || profile.user_id || email || name,
       name,
@@ -329,13 +329,18 @@ export class LarkOAuthService {
       avatar: cleanEnv(profile.avatar_url) || cleanEnv(profile.avatar_thumb) || undefined,
       department: cleanEnv(profile.department) || cleanEnv(profile.department_ids?.join(",")) || "未设置",
       role: primaryUserRole(roles),
-      roles
+      roles,
+      requesterRegistered: registerRequester
     };
   }
 
-  private resolveRoles(profile: NonNullable<LarkUserInfoResponse["data"]>): UserRole[] {
+  private resolveRoles(profile: NonNullable<LarkUserInfoResponse["data"]>, registerRequester: boolean): UserRole[] {
     const openId = cleanEnv(profile.open_id).toLowerCase();
     const email = cleanEnv(profile.email).toLowerCase();
+    const name = cleanEnv(profile.name).toLowerCase();
+    const configuredDeliveryNames = splitEnvSet(
+      process.env.LARK_DELIVERY_ADMIN_NAMES || "顾语莺,高骊骏,王志,郭显淼"
+    );
     const roleConfigs: RoleConfig[] = [
       {
         role: "super_admin",
@@ -351,6 +356,8 @@ export class LarkOAuthService {
     const matched = roleConfigs
       .filter((item) => item.openIds.has(openId) || item.emails.has(email))
       .map((item) => item.role);
+    if (configuredDeliveryNames.has(name)) matched.push("delivery_admin");
+    if (registerRequester) matched.push("requester");
     return normalizeUserRoles(matched);
   }
 }

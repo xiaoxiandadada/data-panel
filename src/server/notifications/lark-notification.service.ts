@@ -1,10 +1,12 @@
 import { Injectable } from "@nestjs/common";
 import { cell, normalizeText } from "../core/ledger-utils.js";
 import type { LedgerRecord, NotificationLog, QueueEvent } from "../core/types.js";
+import { hasAdminRole } from "../core/user-roles.js";
 import { LarkOAuthService } from "../auth/lark-oauth.service.js";
 import { LedgerStoreService } from "../infra/ledger-store.service.js";
 
-const recipientFields = ["需求负责人", "需求人", "关注人", "PM", "项目对接人", "解决方案负责人"];
+const requesterFields = ["需求负责人", "需求人", "关注人", "PM"];
+const adminAssignmentFields = ["部门负责人", "项目对接人", "解决方案负责人", "承接方责任人"];
 
 function splitNames(value: string): string[] {
   return value.split(/[、,，;；/\n]+/).map((item) => item.trim()).filter(Boolean);
@@ -81,8 +83,20 @@ export class LarkNotificationService {
   }
 
   private async recipientOpenIds(record: LedgerRecord, payload: Record<string, unknown>): Promise<string[]> {
-    const names = [...new Set(recipientFields.flatMap((field) => splitNames(cell(record, field))))];
-    const known = await this.store.findUsersByNames(names);
+    const requesterNames = [...new Set(requesterFields.flatMap((field) => splitNames(cell(record, field))))];
+    const adminCandidates = [...new Set(adminAssignmentFields.flatMap((field) => splitNames(cell(record, field))))];
+    const known = await this.store.findUsersByNames([...requesterNames, ...adminCandidates]);
+    const configuredAdminNames = new Set(
+      String(process.env.LARK_DELIVERY_ADMIN_NAMES || "顾语莺,高骊骏,王志,郭显淼")
+        .split(/[、,，;；\n]+/)
+        .map(normalizeText)
+        .filter(Boolean)
+    );
+    const storedAdminNames = new Set(known.filter(hasAdminRole).map((user) => normalizeText(user.name)));
+    const adminNames = adminCandidates.filter((name) => (
+      configuredAdminNames.has(normalizeText(name)) || storedAdminNames.has(normalizeText(name))
+    ));
+    const names = [...new Set([...requesterNames, ...adminNames])];
     const byName = new Map(known.map((user) => [normalizeText(user.name), user.openId]));
     const missing = names.filter((name) => !byName.has(normalizeText(name)));
     for (const name of missing.slice(0, 20)) {
@@ -101,7 +115,7 @@ export class LarkNotificationService {
   }
 
   private payloadRecipients(payload: Record<string, unknown>): string[] {
-    const values = [payload.actorOpenId, payload.requesterOpenId, payload.ownerOpenId];
+    const values = [payload.requesterOpenId, payload.ownerOpenId];
     const extra = Array.isArray(payload.recipientOpenIds) ? payload.recipientOpenIds : [];
     return [...new Set([...values, ...extra].map((value) => String(value || "").trim()).filter(Boolean))];
   }
@@ -109,7 +123,14 @@ export class LarkNotificationService {
   private messageText(event: QueueEvent, record: { name: string; status: string; sprint: string } | null): string {
     const lines = [`【交付管线】${eventLabel(event.eventName)}`];
     if (record) {
-      lines.push(`需求：${record.name}`, `状态：${record.status}`);
+      lines.push(`需求：${record.name}`);
+      const beforeStatus = String(event.payload.beforeStatus || "").trim();
+      const afterStatus = String(event.payload.afterStatus || "").trim();
+      if (beforeStatus && afterStatus && beforeStatus !== afterStatus) {
+        lines.push(`状态：${beforeStatus} → ${afterStatus}`);
+      } else {
+        lines.push(`状态：${record.status}`);
+      }
       if (record.sprint) lines.push(`Sprint：${record.sprint}`);
     }
     const fields = Array.isArray(event.payload.fields) ? event.payload.fields.map(String).filter(Boolean) : [];

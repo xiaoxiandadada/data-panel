@@ -41,52 +41,7 @@ const FILTER_FIELDS = [
   "承接方",
   "承接方责任人"
 ];
-const CORE_COLUMNS = ["项目名称", "获取状态", "隶属部门", "项目对接人", "解决方案负责人", "Sprint"];
 const REQUESTER_COLUMNS = ["项目名称", "获取状态", "隶属部门", "需求负责人", "需求人", "关注人", "PM", "项目对接人", "解决方案负责人", "需求提出时间", "期望交付日期", "Sprint", "满意度", "满意度评价来源"];
-const OWNER_FIELD_GROUPS = [
-  {
-    id: "gu-yuying",
-    name: "顾语莺视图",
-    owner: "顾语莺",
-    description: "来自总表字段说明，负责方案澄清、需求文档、获取渠道、询价与方案负责人等词条。",
-    fields: ["需求澄清完成时间", "需求文档", "获取渠道", "解决方案负责人", "正式询价邮件时间", "采购反馈预报价时间", "获取状态"]
-  },
-  {
-    id: "gao-wang",
-    name: "高骊骏/王志视图",
-    owner: "高骊骏 王志",
-    description: "来自总表字段说明，负责承接执行、交付节点、异常、验收与入库平台等词条。",
-    fields: ["开始执行时间", "承接方", "数据平台ID", "需求异常原因", "入库地址", "交付异常反馈", "交付异常原因", "实际交付完成日期", "数据平台地址", "期望交付日期", "阻塞项", "一验通过时间", "实际验收通过时间", "项目备注", "承接方责任人", "计划验收完成时间", "供应商承诺交付日期", "获取状态"]
-  },
-  {
-    id: "guo-xianmiao",
-    name: "郭显淼视图",
-    owner: "郭显淼",
-    description: "来自总表字段说明，负责 Sprint、预算、OA 节点、任务代码等词条。",
-    fields: ["Sprint", "预算金额", "需求OA完成时间", "任务代码", "获取状态"]
-  },
-  {
-    id: "acceptance",
-    name: "验收视图",
-    owner: "高骊骏",
-    description: "来自总表字段说明，聚合验收结论、验收备注等验收侧维护词条。",
-    fields: ["验收结论", "验收备注", "实际验收通过时间", "验收通过数据量（个）", "验收通过交付量(GB)"]
-  },
-  {
-    id: "skill",
-    name: "标签视图",
-    owner: "王志",
-    description: "来自总表字段说明，负责作业技能标签等需求分类词条。",
-    fields: ["作业技能标签", "领域或学科", "需求异常原因", "项目备注"]
-  },
-  {
-    id: "super",
-    name: "超级管理员",
-    owner: "超级管理员",
-    description: "查看和编辑全部台账字段。",
-    fields: TABLE_COLUMNS
-  }
-];
 const DEMAND_FORM_FIELDS = [
   { name: "需求描述", type: "textarea", required: true, placeholder: "说明需要什么数据、用途、范围、质量要求" },
   { name: "需求负责人", type: "text", required: true, defaultCurrentUser: true, placeholder: "负责维护该需求和添加关注人" },
@@ -227,9 +182,10 @@ let state = {
   requesterName: "",
   requesters: [],
   requesterRecords: [],
-  ownerGroupId: "gu-yuying",
   suggestionIndex: -1,
   filters: {},
+  sortField: "",
+  sortDirection: "",
   adminMode: false,
   adminToken: "",
   editingRecordId: null,
@@ -246,7 +202,9 @@ let state = {
   larkSyncIntervalMs: 300000,
   larkSyncStatus: {},
   adminUsers: [],
+  adminCandidates: [],
   adminUserQuery: "",
+  adminSearchTimer: 0,
   importPreview: null,
   importFile: null
 };
@@ -262,7 +220,7 @@ function isSuperAdmin() {
 }
 
 function userRoles(user) {
-  return [...new Set(["requester", ...(user?.roles || []), user?.role].filter(Boolean))];
+  return [...new Set([...(user?.roles || []), user?.role].filter(Boolean))];
 }
 
 function hasAdminCapability(user = state.currentUser) {
@@ -300,28 +258,8 @@ function pinnedColumnPresentation(column, columns) {
   };
 }
 
-function ownerNames(owner) {
-  return String(owner || "")
-    .split(/[、,，/\s]+/)
-    .map((name) => normalizeText(name))
-    .filter(Boolean);
-}
-
-function availableOwnerGroups() {
-  if (!state.adminMode) return [];
-  if (isSuperAdmin()) return OWNER_FIELD_GROUPS;
-  const currentName = normalizeText(state.currentUser?.name || "");
-  return OWNER_FIELD_GROUPS.filter((group) => group.id !== "super" && ownerNames(group.owner).includes(currentName));
-}
-
-function activeOwnerGroup() {
-  const groups = availableOwnerGroups();
-  return groups.find((item) => item.id === state.ownerGroupId) || groups[0] || null;
-}
-
-function canEditOwnerField(field) {
-  if (isSuperAdmin()) return true;
-  return Boolean(activeOwnerGroup()?.fields.includes(field));
+function canEditAdminField(field) {
+  return state.adminMode && Boolean(field);
 }
 
 function escapeHtml(value) {
@@ -579,15 +517,24 @@ function matchesQuery(record, query) {
 }
 
 function filteredRecords() {
-  const hasQuery = Boolean(state.query.trim());
   if (!state.adminMode) return state.requesterRecords;
   const sourceRecords = state.adminMode ? state.records : state.publicRecords;
-  return sourceRecords.filter((record) => {
+  const filtered = sourceRecords.filter((record) => {
     const queryMatch = matchesQuery(record, state.query);
     const filtersMatch = state.adminMode
       ? Object.entries(state.filters).every(([field, value]) => !value || cell(record, field) === value)
       : true;
     return queryMatch && filtersMatch;
+  });
+  if (!state.sortField || !state.sortDirection) return filtered;
+  const direction = state.sortDirection === "desc" ? -1 : 1;
+  return [...filtered].sort((left, right) => {
+    const a = cell(left, state.sortField);
+    const b = cell(right, state.sortField);
+    const dateA = parseDate(a);
+    const dateB = parseDate(b);
+    if (dateA && dateB) return (dateA - dateB) * direction;
+    return String(a).localeCompare(String(b), "zh-CN", { numeric: true, sensitivity: "base" }) * direction;
   });
 }
 
@@ -782,7 +729,9 @@ async function loadRequesterRecords() {
 
 async function loadRequesterBootstrap() {
   if (state.adminMode) return;
-  state.requesters = state.mockUsers.map((user) => user.name);
+  state.requesters = state.mockUsers
+    .filter((user) => userRoles(user).includes("requester"))
+    .map((user) => user.name);
   if (state.authRole === "requester" && state.currentUser) {
     state.requesterName = state.currentUser.name;
     state.requesterRecords = await loadRequesterRecords();
@@ -834,19 +783,35 @@ function renderSearchHint(records) {
 
 function renderHeaderCell(column, columns = []) {
   const pin = pinnedColumnPresentation(column, columns);
-  if (!state.adminMode || !FILTER_FIELDS.includes(column)) {
+  if (!state.adminMode || column === "操作") {
     return `<th class="${pin.className}" style="${pin.style}">${escapeHtml(column)}</th>`;
   }
 
-  const options = uniqueValues(column);
+  const filterable = FILTER_FIELDS.includes(column);
+  const options = filterable ? uniqueValues(column) : [];
+  const pinned = (state.fieldPreferences.pinnedFields || []).includes(column);
+  const sortLabel = state.sortField === column
+    ? (state.sortDirection === "asc" ? "升序" : "降序")
+    : "排序";
   return `
     <th class="filterable-head ${pin.className}" style="${pin.style}">
       <label class="table-head-control">
-        <span>${escapeHtml(column)}</span>
-        <select class="table-filter-select" data-filter-field="${escapeHtml(column)}">
-          <option value="">全部</option>
-          ${options.map((value) => `<option value="${escapeHtml(value)}" ${state.filters[column] === value ? "selected" : ""}>${escapeHtml(statusLabel(value))}</option>`).join("")}
-        </select>
+        <span class="table-head-title">
+          <b>${escapeHtml(column)}</b>
+          <span class="table-head-actions">
+            <button class="column-action ${state.sortField === column ? "active" : ""}" type="button"
+              data-sort-column="${escapeAttr(column)}" title="${escapeAttr(sortLabel)}">${state.sortField === column && state.sortDirection === "desc" ? "↓" : "↑"}</button>
+            <button class="column-action ${pinned ? "active" : ""}" type="button"
+              data-pin-column="${escapeAttr(column)}" title="${pinned ? "取消固定" : "固定列"}">⌖</button>
+            <button class="column-action" type="button" data-hide-column="${escapeAttr(column)}" title="隐藏列">−</button>
+          </span>
+        </span>
+        ${filterable ? `
+          <select class="table-filter-select" data-filter-field="${escapeHtml(column)}">
+            <option value="">全部</option>
+            ${options.map((value) => `<option value="${escapeHtml(value)}" ${state.filters[column] === value ? "selected" : ""}>${escapeHtml(statusLabel(value))}</option>`).join("")}
+          </select>
+        ` : ""}
       </label>
     </th>
   `;
@@ -1027,126 +992,11 @@ async function submitSatisfaction(recordId, score, comment) {
   renderAll();
 }
 
-function columnsForOwnerGroup(group) {
-  const hidden = new Set(state.fieldPreferences.hiddenFields || []);
-  const columns = [...new Set([...CORE_COLUMNS, ...(group?.fields || [])])]
-    .filter((column) => !hidden.has(column))
-    .filter((column) => state.fields.some((field) => (field.name || field.id) === column) || TABLE_COLUMNS.includes(column));
-  return orderAndPinColumns(columns);
-}
-
-function renderGenericTable(containerId, records, columns, editable = false) {
-  const container = el(containerId);
-  if (!records.length) {
-    container.innerHTML = `<div class="empty">没有符合条件的项目</div>`;
-    return;
-  }
-  const finalColumns = editable ? [...columns, "操作"] : columns;
-  container.innerHTML = `
-    <table class="data-table admin-table">
-      <thead>
-        <tr>${finalColumns.map((column) => editable ? renderHeaderCell(column, columns) : `<th>${escapeHtml(column)}</th>`).join("")}</tr>
-      </thead>
-      <tbody>
-        ${records.map((record) => renderRowWithColumns(record, columns, editable)).join("")}
-      </tbody>
-    </table>
-  `;
-}
-
-function renderRowWithColumns(record, columns, editable = false) {
-  const cells = columns.map((column) => {
-    const value = cell(record, column);
-    const pin = pinnedColumnPresentation(column, columns);
-    if (column === "获取状态" && editable && canEditOwnerField(column)) {
-      return `<td class="status-cell ${pin.className}" style="${pin.style}">${renderStatusSelect(record, value)}</td>`;
-    }
-    const className = `${column === "项目名称" ? "project-name-cell" : ""} ${pin.className}`;
-    return `<td class="${className}" style="${pin.style}" title="${escapeHtml(value)}">${renderFieldValue(column, value)}</td>`;
-  }).join("");
-  return `
-    <tr data-record-id="${escapeHtml(record.record_id)}">
-      ${cells}
-      ${editable ? `
-        <td class="row-actions">
-          <button class="button mini" type="button" data-detail-record="${escapeHtml(record.record_id)}">详情</button>
-          <button class="button mini" type="button" data-edit-record="${escapeHtml(record.record_id)}">编辑</button>
-        </td>
-      ` : ""}
-    </tr>
-  `;
-}
-
-function renderOwnerView(records) {
-  const groups = availableOwnerGroups();
-  const group = activeOwnerGroup();
-  el("ownerViewSection").classList.remove("hidden");
-  el("ownerViewCount").textContent = `${groups.length} 组`;
-  if (!group) {
-    el("ownerTabs").innerHTML = "";
-    el("ownerFieldChips").innerHTML = `<div class="owner-description">当前飞书账号已是管理员，但尚未匹配到负责字段视图。请由超级管理员为该账号配置对应负责人权限。</div>`;
-    el("ownerRecords").innerHTML = `<div class="empty">暂无可维护的字段视图</div>`;
-    return;
-  }
-  state.ownerGroupId = group.id;
-  el("ownerTabs").innerHTML = groups.map((item) => `
-    <button class="role-tab ${item.id === group.id ? "active" : ""}" type="button" data-owner-group="${escapeHtml(item.id)}">
-      <span>${escapeHtml(item.name)}</span>
-      <small>${escapeHtml(item.owner)}</small>
-    </button>
-  `).join("");
-  el("ownerFieldChips").innerHTML = `
-    <div class="owner-description">${escapeHtml(group.description)}</div>
-    ${group.fields.map((field) => `<span class="field-chip">${escapeHtml(field)}</span>`).join("")}
-  `;
-  const columns = group.id === "super" ? visibleAdminColumns() : columnsForOwnerGroup(group);
-  renderGenericTable("ownerRecords", records, columns, true);
-}
-
-function daysBetween(startText, endText) {
-  const start = parseDate(startText);
-  const end = parseDate(endText);
-  if (!start || !end) return null;
-  return Math.max(0, Math.round((end - start) / 86400000));
-}
-
-function averageDays(records, startField, endField) {
-  const values = records
-    .map((record) => daysBetween(cell(record, startField), cell(record, endField)))
-    .filter((value) => value != null);
-  return values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : null;
-}
-
-function renderAnalytics(records) {
-  el("analyticsSection").classList.remove("hidden");
-  const solutionDays = averageDays(records, "需求提出时间", "需求澄清完成时间");
-  const firstDeliveryDays = averageDays(records, "开始执行时间", "实际交付完成日期");
-  const totalDeliveryDays = averageDays(records, "需求提出时间", "实际验收通过时间");
-  const satisfactionScores = records.map((record) => Number(cell(record, "满意度"))).filter((value) => value >= 1 && value <= 5);
-  const satisfactionAverage = satisfactionScores.length ? (satisfactionScores.reduce((sum, value) => sum + value, 0) / satisfactionScores.length).toFixed(1) : "待统计";
-  const autoGood = records.filter((record) => cell(record, "满意度评价来源") === "系统自动").length;
-  const cards = [
-    ["方案处理耗时", solutionDays == null ? "待统计" : `${solutionDays} 天`, "需求提出到需求澄清完成"],
-    ["首次全量交付", firstDeliveryDays == null ? "待统计" : `${firstDeliveryDays} 天`, "开始执行到实际交付完成"],
-    ["整体交付周期", totalDeliveryDays == null ? "待统计" : `${totalDeliveryDays} 天`, "需求提出到验收通过"],
-    ["平均满意度", satisfactionAverage === "待统计" ? satisfactionAverage : `${satisfactionAverage} / 5`, `已评价 ${satisfactionScores.length} 条，其中系统默认 ${autoGood} 条`]
-  ];
-  el("analyticsCards").innerHTML = cards.map(([title, value, hint]) => `
-    <article class="analytics-card">
-      <span>${escapeHtml(title)}</span>
-      <strong>${escapeHtml(value)}</strong>
-      <p>${escapeHtml(hint)}</p>
-    </article>
-  `).join("");
-}
-
 function renderWorkspace() {
   const records = filteredRecords();
   const superAdmin = isSuperAdmin();
-  if (state.adminMode && !superAdmin && state.activeView !== "owners") {
-    state.activeView = "owners";
-  }
-  const showAdminData = state.adminMode && superAdmin && state.activeView === "ledger";
+  if (state.adminMode) state.activeView = "ledger";
+  const showAdminData = state.adminMode;
 
   el("loginGate").classList.toggle("hidden", Boolean(state.authRole));
   el("requesterSection").classList.toggle("hidden", state.authRole !== "requester");
@@ -1154,16 +1004,17 @@ function renderWorkspace() {
   el("kpiSection").classList.toggle("hidden", !showAdminData);
   el("dashboardSection").classList.toggle("hidden", !showAdminData);
   el("worklistSection").classList.toggle("hidden", !showAdminData);
-  el("ownerViewSection").classList.toggle("hidden", !state.adminMode || state.activeView !== "owners");
-  el("analyticsSection").classList.toggle("hidden", !state.adminMode || !superAdmin || state.activeView !== "analytics");
-  el("adminTabs").classList.toggle("hidden", !state.adminMode || !superAdmin);
+  el("adminTabs").classList.toggle("hidden", !state.adminMode);
   el("importButton").classList.toggle("hidden", !superAdmin);
   el("addRecordButton").classList.toggle("hidden", !state.adminMode);
   el("fieldSettingsButton").classList.toggle("hidden", !state.adminMode);
   el("larkSourcesButton").classList.toggle("hidden", !state.adminMode);
   el("userManagementButton").classList.toggle("hidden", !state.adminMode || !superAdmin);
   el("downloadMyDataButton").classList.toggle("hidden", state.authRole !== "requester");
-  el("workspaceModeButton").classList.toggle("hidden", !hasAdminCapability());
+  el("workspaceModeButton").classList.toggle(
+    "hidden",
+    !hasAdminCapability() || !userRoles(state.currentUser).includes("requester")
+  );
   el("workspaceModeButton").textContent = state.adminMode ? "切换到我的需求" : "切换到管理员视图";
   el("filterGrid").classList.add("hidden");
   el("activeFilters").classList.add("hidden");
@@ -1182,11 +1033,9 @@ function renderWorkspace() {
     return;
   }
 
-  if (superAdmin) {
-    el("adminTabs").querySelectorAll("[data-view]").forEach((button) => {
-      button.classList.toggle("active", button.dataset.view === state.activeView);
-    });
-  }
+  el("adminTabs").querySelectorAll("[data-view]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.view === "ledger");
+  });
 
   if (showAdminData) {
     renderKpis(records);
@@ -1194,10 +1043,6 @@ function renderWorkspace() {
     renderOwners(records);
     renderTimeline(records);
     renderTable(records);
-  } else if (state.activeView === "owners") {
-    renderOwnerView(records);
-  } else if (superAdmin && state.activeView === "analytics") {
-    renderAnalytics(records);
   }
   updateModeUI();
 }
@@ -1227,6 +1072,7 @@ async function loadFieldPreferences() {
 async function openUserManagement() {
   const result = await fetchJson("/api/admin/users");
   state.adminUsers = result.users || [];
+  state.adminCandidates = [];
   state.adminUserQuery = "";
   el("userManagementSearch").value = "";
   renderUserManagement();
@@ -1240,14 +1086,15 @@ function renderUserManagement() {
     user.department,
     user.email
   ].filter(Boolean).join(" ")).includes(query));
+  const existingIds = new Set(state.adminUsers.map((user) => user.openId));
+  const candidates = state.adminCandidates.filter((user) => !existingIds.has(user.openId));
   const adminCount = state.adminUsers.filter((user) => userRoles(user).includes("delivery_admin")).length;
   el("userManagementSummary").textContent = query
-    ? `${users.length} 位匹配成员`
-    : `${state.adminUsers.length} 位成员 · ${adminCount} 位交付管理员`;
-  el("userManagementList").innerHTML = users.length ? users.map((user) => {
+    ? `${candidates.length} 位可任命成员`
+    : `${adminCount} 位交付管理员`;
+  const adminRows = users.map((user) => {
     const roles = userRoles(user);
     const superAdmin = roles.includes("super_admin");
-    const deliveryAdmin = roles.includes("delivery_admin");
     return `
       <article class="user-management-row">
         <div class="user-profile">
@@ -1255,22 +1102,34 @@ function renderUserManagement() {
           <span>${escapeHtml([user.department, user.email, user.openId].filter(Boolean).join(" · "))}</span>
         </div>
         <div class="user-role-controls">
-          <span class="role-badge">需求方</span>
           ${superAdmin
             ? `<span class="role-badge super">超级管理员</span>`
-            : deliveryAdmin
-              ? `<span class="role-badge admin">交付管理员</span>
-                <button class="button mini danger-action" type="button" data-admin-action="revoke" data-admin-open-id="${escapeAttr(user.openId)}">撤销管理员</button>`
-              : `<span class="role-badge pending">待审批成员</span>
-                <button class="button mini primary" type="button" data-admin-action="grant" data-admin-open-id="${escapeAttr(user.openId)}">任命为管理员</button>`
+            : `<span class="role-badge admin">交付管理员</span>
+              <button class="button mini danger-action" type="button" data-admin-action="revoke" data-admin-open-id="${escapeAttr(user.openId)}">移除管理员</button>`
           }
         </div>
       </article>`;
-  }).join("") : `<div class="empty compact">${query ? "没有匹配的企业成员。" : "暂无用户；成员首次通过飞书登录后会出现在这里。"}</div>`;
+  }).join("");
+  const candidateRows = candidates.map((user) => `
+    <article class="user-management-row candidate">
+      <div class="user-profile">
+        <strong>${escapeHtml(user.name || "未命名用户")}</strong>
+        <span>${escapeHtml([user.department, user.email].filter(Boolean).join(" · ") || user.openId)}</span>
+      </div>
+      <div class="user-role-controls">
+        <span class="role-badge pending">飞书成员</span>
+        <button class="button mini primary" type="button" data-admin-action="grant" data-admin-open-id="${escapeAttr(user.openId)}">任命管理员</button>
+      </div>
+    </article>
+  `).join("");
+  const empty = query
+    ? `<div class="empty compact">${state.adminCandidates.length ? "匹配成员已是管理员。" : "输入姓名后从飞书通讯录查找。"}</div>`
+    : `<div class="empty compact">输入姓名可从飞书通讯录任命新的管理员。</div>`;
+  el("userManagementList").innerHTML = [adminRows, candidateRows].filter(Boolean).join("") || empty;
 }
 
 async function updateAdminAccess(openId, action) {
-  const user = state.adminUsers.find((item) => item.openId === openId);
+  const user = [...state.adminUsers, ...state.adminCandidates].find((item) => item.openId === openId);
   if (!user) return;
   const granting = action === "grant";
   const confirmed = window.confirm(
@@ -1279,16 +1138,39 @@ async function updateAdminAccess(openId, action) {
       : `确认撤销“${user.name || "该成员"}”的交付管理员权限？`
   );
   if (!confirmed) return;
-  const roles = granting ? ["requester", "delivery_admin"] : ["requester"];
+  const currentRoles = userRoles(user).filter((role) => !["member", "delivery_admin"].includes(role));
+  const roles = granting ? [...currentRoles, "delivery_admin"] : (currentRoles.length ? currentRoles : ["member"]);
   const result = await fetchJson(`/api/admin/users/${encodeURIComponent(openId)}/role`, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       roles,
-      note: granting ? "超级管理员审批通过" : "超级管理员撤销权限"
+      user: {
+        openId: user.openId,
+        name: user.name,
+        email: user.email || "",
+        department: user.department || "未设置",
+        avatar: user.avatar
+      },
+      note: granting ? "超级管理员任命" : "超级管理员移除"
     })
   });
-  state.adminUsers = state.adminUsers.map((user) => user.openId === openId ? result.user : user);
+  state.adminUsers = granting
+    ? [...state.adminUsers.filter((item) => item.openId !== openId), result.user]
+    : state.adminUsers.filter((item) => item.openId !== openId);
+  state.adminCandidates = state.adminCandidates.filter((item) => item.openId !== openId);
+  renderUserManagement();
+}
+
+async function searchAdminCandidates(query) {
+  const keyword = String(query || "").trim();
+  if (!keyword) {
+    state.adminCandidates = [];
+    renderUserManagement();
+    return;
+  }
+  const result = await fetchJson(`/api/lark/users/search?q=${encodeURIComponent(keyword)}&limit=12`);
+  state.adminCandidates = result.users || [];
   renderUserManagement();
 }
 
@@ -1363,6 +1245,53 @@ async function saveFieldSettings() {
   state.fieldPreferences = result.preferences;
   state.fieldPreferencesBackup = null;
   el("fieldSettingsDialog").close();
+  renderWorkspace();
+}
+
+async function persistFieldPreferences() {
+  const result = await fetchJson("/api/preferences/fields", {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(state.fieldPreferences)
+  });
+  state.fieldPreferences = result.preferences;
+  renderWorkspace();
+}
+
+async function hideTableColumn(column) {
+  if (visibleAdminColumns().length <= 1) {
+    alert("台账至少保留一个显示词条");
+    return;
+  }
+  state.fieldPreferences.hiddenFields = [...new Set([...(state.fieldPreferences.hiddenFields || []), column])];
+  state.fieldPreferences.pinnedFields = (state.fieldPreferences.pinnedFields || []).filter((field) => field !== column);
+  await persistFieldPreferences();
+}
+
+async function togglePinnedTableColumn(column) {
+  const pinned = new Set(state.fieldPreferences.pinnedFields || []);
+  if (pinned.has(column)) pinned.delete(column);
+  else {
+    if (pinned.size >= 4) {
+      alert("最多固定 4 个词条");
+      return;
+    }
+    pinned.add(column);
+  }
+  state.fieldPreferences.pinnedFields = [...pinned];
+  await persistFieldPreferences();
+}
+
+function toggleTableSort(column) {
+  if (state.sortField !== column) {
+    state.sortField = column;
+    state.sortDirection = "asc";
+  } else if (state.sortDirection === "asc") {
+    state.sortDirection = "desc";
+  } else {
+    state.sortField = "";
+    state.sortDirection = "";
+  }
   renderWorkspace();
 }
 
@@ -1526,13 +1455,13 @@ function updateLoginGate() {
 
   if (copy) {
     copy.textContent = oauthMode
-      ? "需求方登录后查看个人进展；仅预先配置的负责人可进入对应工作台。"
-      : "需求方登录后查看自己的需求进展并提交新需求，管理员维护台账和负责人视图。";
+      ? "需求方登录后查看个人进展；仅由超级管理员任命的成员可进入管理员台账。"
+      : "需求方登录后查看自己的需求进展并提交新需求，管理员维护交付台账。";
   }
   if (requesterLoginLabel) requesterLoginLabel.textContent = "需求方登录";
   if (requesterLoginHint) requesterLoginHint.textContent = oauthMode ? "使用飞书账号验证身份" : "查看我的需求进展";
   if (adminLoginLabel) adminLoginLabel.textContent = oauthMode ? "管理员登录" : "管理员登录";
-  if (adminLoginHint) adminLoginHint.textContent = oauthMode ? "仅已配置管理员可进入" : "维护台账与负责人视图";
+  if (adminLoginHint) adminLoginHint.textContent = oauthMode ? "仅已任命管理员可进入" : "维护交付台账";
   el("authMethodLabel").textContent = oauthMode ? "Feishu OAuth" : "Local Preview";
   el("authMethodHint").textContent = oauthMode ? "企业身份认证" : "本地演示身份";
   el("requesterRegisterButton").classList.toggle("hidden", oauthMode);
@@ -1550,11 +1479,12 @@ function applyUser(user, preferredMode = "") {
     state.requesterName = "";
     return;
   }
-  const useAdminMode = hasAdminCapability(user) && preferredMode === "admin";
+  const roles = userRoles(user);
+  const useAdminMode = hasAdminCapability(user) && (preferredMode === "admin" || !roles.includes("requester"));
   state.authRole = useAdminMode ? "admin" : "requester";
   state.adminMode = state.authRole === "admin";
   state.requesterName = user.name;
-  state.activeView = state.authRole === "admin" ? (user.role === "super_admin" ? "ledger" : "owners") : state.authRole;
+  state.activeView = state.authRole === "admin" ? "ledger" : state.authRole;
 }
 
 async function loadSession() {
@@ -1749,7 +1679,7 @@ function openRecordDialog(record = null) {
   const hidden = new Set(state.fieldPreferences.hiddenFields || []);
   const editableFields = isSuperAdmin()
     ? state.fields.filter((field) => !hidden.has(field.name || field.id))
-    : state.fields.filter((field) => canEditOwnerField(field.name || field.id) && !hidden.has(field.name || field.id));
+    : state.fields.filter((field) => canEditAdminField(field.name || field.id) && !hidden.has(field.name || field.id));
   el("recordFormFields").innerHTML = editableFields.map((field, index) => {
     const name = field.name || field.id;
     const value = record ? cell(record, name) : "";
@@ -1905,19 +1835,19 @@ el("userManagementList").addEventListener("click", (event) => {
 });
 el("userManagementSearch").addEventListener("input", (event) => {
   state.adminUserQuery = event.target.value;
-  renderUserManagement();
+  window.clearTimeout(state.adminSearchTimer);
+  state.adminSearchTimer = window.setTimeout(() => {
+    searchAdminCandidates(state.adminUserQuery).catch((error) => {
+      state.adminCandidates = [];
+      renderUserManagement();
+      alert(error.message);
+    });
+  }, 300);
 });
 el("adminTabs").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-view]");
   if (!button) return;
   state.activeView = button.dataset.view;
-  renderWorkspace();
-});
-el("ownerTabs").addEventListener("click", (event) => {
-  const button = event.target.closest("button[data-owner-group]");
-  if (!button) return;
-  if (!availableOwnerGroups().some((group) => group.id === button.dataset.ownerGroup)) return;
-  state.ownerGroupId = button.dataset.ownerGroup;
   renderWorkspace();
 });
 el("requesterLoginButton").addEventListener("click", () => openRequesterAuthDialog("login"));
@@ -2035,6 +1965,21 @@ el("activeFilters").addEventListener("click", (event) => {
   }
 });
 el("records").addEventListener("click", (event) => {
+  const sortColumn = event.target.closest("button[data-sort-column]")?.dataset.sortColumn;
+  if (sortColumn) {
+    toggleTableSort(sortColumn);
+    return;
+  }
+  const pinColumn = event.target.closest("button[data-pin-column]")?.dataset.pinColumn;
+  if (pinColumn) {
+    togglePinnedTableColumn(pinColumn).catch((error) => alert(error.message));
+    return;
+  }
+  const hideColumn = event.target.closest("button[data-hide-column]")?.dataset.hideColumn;
+  if (hideColumn) {
+    hideTableColumn(hideColumn).catch((error) => alert(error.message));
+    return;
+  }
   const detailId = event.target.closest("button[data-detail-record]")?.dataset.detailRecord;
   if (detailId) {
     const record = state.records.find((item) => item.record_id === detailId);
@@ -2199,38 +2144,6 @@ el("adminForm").addEventListener("submit", async (event) => {
   el("adminDialog").close();
   await loadData();
 });
-
-function attachRecordHandlers(containerId) {
-  el(containerId).addEventListener("click", (event) => {
-    const detailId = event.target.closest("button[data-detail-record]")?.dataset.detailRecord;
-    if (detailId) {
-      const record = state.records.find((item) => item.record_id === detailId);
-      openDetailDialog(record).catch((error) => {
-        alert(error.message);
-        closeDetailDialog();
-      });
-      return;
-    }
-    const editId = event.target.closest("button[data-edit-record]")?.dataset.editRecord;
-    if (!editId) return;
-    const record = state.records.find((item) => item.record_id === editId);
-    openRecordDialog(record);
-  });
-  el(containerId).addEventListener("change", async (event) => {
-    const filterSelect = event.target.closest("select[data-filter-field]");
-    if (filterSelect) {
-      state.filters[filterSelect.dataset.filterField] = filterSelect.value;
-      renderWorkspace();
-      return;
-    }
-
-    const select = event.target.closest("select[data-status-record]");
-    if (!select) return;
-    await updateRecord(select.dataset.statusRecord, { "获取状态": select.value });
-  });
-}
-
-attachRecordHandlers("ownerRecords");
 
 async function bootstrap() {
   await loadSession();

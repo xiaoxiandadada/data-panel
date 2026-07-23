@@ -207,10 +207,15 @@ export class LedgerStoreService implements OnModuleInit {
     if (this.mongoReady && this.db) {
       const now = new Date();
       const existing = await this.appUsers().findOne({ openId: user.openId });
+      const requesterRegistered = Boolean(existing?.requesterRegistered || user.requesterRegistered);
+      const priorRoles = ((existing?.roles as UserRole[] | undefined) || [])
+        .filter((role) => role !== "requester" && role !== "member");
+      const incomingRoles = [...(user.roles || []), user.role]
+        .filter((role) => role !== "requester" && role !== "member");
       const roles = normalizeUserRoles([
-        ...((existing?.roles as UserRole[] | undefined) || []),
-        ...(user.roles || []),
-        user.role
+        ...priorRoles,
+        ...incomingRoles,
+        ...(requesterRegistered ? ["requester" as UserRole] : [])
       ]);
       const role = primaryUserRole(roles);
       const { role: _incomingRole, roles: _incomingRoles, ...profile } = user;
@@ -221,6 +226,7 @@ export class LedgerStoreService implements OnModuleInit {
             ...profile,
             role,
             roles,
+            requesterRegistered,
             last_login_at: now
           },
           $setOnInsert: {
@@ -261,7 +267,12 @@ export class LedgerStoreService implements OnModuleInit {
 
   async updateUserRoles(openId: string, requestedRoles: UserRole[]): Promise<AppUser | null> {
     if (!this.mongoReady || !this.db) return null;
-    const roles = normalizeUserRoles(requestedRoles);
+    const existing = await this.appUsers().findOne({ openId });
+    if (!existing) return null;
+    const roles = normalizeUserRoles([
+      ...requestedRoles.filter((role) => role !== "requester" && role !== "member"),
+      ...(existing.requesterRegistered ? ["requester" as UserRole] : [])
+    ]);
     const updated = await this.appUsers().findOneAndUpdate(
       { openId },
       { $set: { role: primaryUserRole(roles), roles } },
@@ -340,8 +351,12 @@ export class LedgerStoreService implements OnModuleInit {
   }
 
   private normalizeStoredUser(user: AppUser): AppUser {
-    const roles = normalizeUserRoles([...(user.roles || []), user.role]);
-    return { ...user, role: primaryUserRole(roles), roles };
+    const roles = normalizeUserRoles([
+      ...(user.roles || []).filter((role) => role !== "requester" && role !== "member"),
+      ...(user.role !== "requester" && user.role !== "member" ? [user.role] : []),
+      ...(user.requesterRegistered ? ["requester" as UserRole] : [])
+    ]);
+    return { ...user, role: primaryUserRole(roles), roles, requesterRegistered: Boolean(user.requesterRegistered) };
   }
 
   private async ensureIndexes() {

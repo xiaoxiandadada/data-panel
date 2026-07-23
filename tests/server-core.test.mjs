@@ -8,6 +8,7 @@ import { hasAdminRole, normalizeUserRoles, primaryUserRole } from "../dist/serve
 import { LarkOAuthService } from "../dist/server/auth/lark-oauth.service.js";
 import { LarkBaseSyncService } from "../dist/server/sync/lark-base-sync.service.js";
 import { LedgerController } from "../dist/server/ledger/ledger.controller.js";
+import { LarkNotificationService } from "../dist/server/notifications/lark-notification.service.js";
 
 function dataset(rows) {
   const names = [...new Set(rows.flatMap((row) => Object.keys(row)))];
@@ -73,11 +74,12 @@ test("request form only stores PM when requester explicitly enables it", () => {
   assert.equal(disabled.PM, "");
 });
 
-test("administrator roles always retain requester capability", () => {
+test("administrator and requester capabilities are assigned independently", () => {
   const roles = normalizeUserRoles(["delivery_admin"]);
   const user = { openId: "ou_test", name: "管理员", email: "", department: "", role: primaryUserRole(roles), roles };
-  assert.deepEqual(roles, ["delivery_admin", "requester"]);
+  assert.deepEqual(roles, ["delivery_admin"]);
   assert.equal(hasAdminRole(user), true);
+  assert.deepEqual(normalizeUserRoles([]), ["member"]);
 });
 
 test("super administrator appointment updates roles and writes an audit log", async () => {
@@ -87,7 +89,7 @@ test("super administrator appointment updates roles and writes an audit log", as
     email: "",
     department: "",
     role: "super_admin",
-    roles: ["super_admin", "requester"]
+    roles: ["super_admin"]
   };
   const target = {
     openId: "ou_member",
@@ -124,13 +126,13 @@ test("super administrator appointment updates roles and writes an audit log", as
     { headers: { cookie: "delivery_session=test" } },
     undefined,
     target.openId,
-    { roles: ["requester", "delivery_admin"], note: "测试审批" }
+    { roles: ["delivery_admin"], note: "测试任命" }
   );
 
-  assert.deepEqual(storedRoles, ["requester", "delivery_admin"]);
-  assert.deepEqual(result.user.roles, ["requester", "delivery_admin"]);
+  assert.deepEqual(storedRoles, ["delivery_admin"]);
+  assert.deepEqual(result.user.roles, ["delivery_admin"]);
   assert.equal(logs.length, 1);
-  assert.equal(logs[0].type, "管理员审批通过");
+  assert.equal(logs[0].type, "管理员任命");
   assert.equal(logs[0].record_id, "user:ou_member");
 });
 
@@ -211,6 +213,96 @@ test("three Feishu business tables merge serially", async () => {
       else process.env[key] = previous[key];
     }
   }
+});
+
+test("Feishu sync emits one application-bot event for a real status change", async () => {
+  const keys = [
+    "LARK_BASE_TOKEN",
+    "LARK_LEDGER_TABLE_ID",
+    "LARK_245_TABLE_ID",
+    "LARK_GAOFENG_TABLE_ID"
+  ];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  Object.assign(process.env, {
+    LARK_BASE_TOKEN: "base-token",
+    LARK_LEDGER_TABLE_ID: "ledger-table",
+    LARK_245_TABLE_ID: "245-table",
+    LARK_GAOFENG_TABLE_ID: "gaofeng-table"
+  });
+  let stored = dataset([
+    { "任务代码": "PJ-001", "项目名称": "Alpha", "获取状态": "需求澄清中" }
+  ]);
+  const events = [];
+  const service = new LarkBaseSyncService(
+    {
+      readDataset: async () => stored,
+      saveDataset: async (next) => { stored = next; },
+      appendImportBatch: async () => {}
+    },
+    {
+      isBotConfigured: () => true,
+      listBaseDataset: async () => dataset([
+        { "任务代码": "PJ-001", "项目名称": "Alpha", "获取状态": "已完结" }
+      ])
+    },
+    { enqueue: async (eventName, payload) => { events.push({ eventName, payload }); } }
+  );
+  try {
+    await service.syncAll("飞书实时推送");
+    const statusEvents = events.filter((event) => event.eventName === "record.updated");
+    assert.equal(statusEvents.length, 1);
+    assert.deepEqual(statusEvents[0].payload.fields, ["获取状态"]);
+    assert.equal(statusEvents[0].payload.beforeStatus, "需求澄清中");
+    assert.equal(statusEvents[0].payload.afterStatus, "已完结");
+    assert.equal(statusEvents[0].payload.source, "总台账");
+  } finally {
+    for (const key of keys) {
+      if (previous[key] == null) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+});
+
+test("status bot notifies requesters and assigned administrators only", async () => {
+  const messages = [];
+  const logs = [];
+  const service = new LarkNotificationService(
+    {
+      readDataset: async () => dataset([{
+        "项目名称": "Alpha",
+        "获取状态": "已完结",
+        "需求人": "需求方甲",
+        "项目对接人": "顾语莺、普通协作人"
+      }]),
+      findUsersByNames: async () => [
+        { openId: "ou_requester", name: "需求方甲", role: "requester", roles: ["requester"] },
+        { openId: "ou_admin", name: "顾语莺", role: "delivery_admin", roles: ["delivery_admin"] },
+        { openId: "ou_collaborator", name: "普通协作人", role: "requester", roles: ["requester"] }
+      ],
+      appendNotificationLog: async (log) => { logs.push(log); }
+    },
+    {
+      isBotConfigured: () => true,
+      sendTextMessage: async (openId, text) => { messages.push({ openId, text }); },
+      sendWebhookMessage: async () => false,
+      searchUsers: async () => []
+    }
+  );
+  await service.process({
+    id: "event-1",
+    eventName: "record.updated",
+    payload: {
+      recordId: "test-1",
+      fields: ["获取状态"],
+      beforeStatus: "需求澄清中",
+      afterStatus: "已完结"
+    },
+    attempts: 1,
+    createdAt: new Date().toISOString()
+  });
+  assert.deepEqual(messages.map((message) => message.openId).sort(), ["ou_admin", "ou_requester"]);
+  assert.equal(messages[0].text.includes("需求澄清中 → 已完结"), true);
+  assert.equal(logs[0].status, "sent");
 });
 
 test("Feishu Base webhook validates its secret and schedules the matching table", () => {
