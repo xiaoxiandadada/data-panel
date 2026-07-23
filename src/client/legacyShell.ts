@@ -26,13 +26,17 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
         <div>
           <p class="eyebrow">AICarrier Delivery Pipeline</p>
           <h1>交付管线</h1>
+          <div id="sessionContext" class="session-context hidden" aria-label="当前登录身份">
+            <span id="sessionRoleLabel">需求方</span>
+            <strong id="sessionUserName">-</strong>
+          </div>
         </div>
         <div class="actions">
           <button id="workspaceModeButton" class="button hidden" type="button">切换到我的需求</button>
           <button id="modeButton" class="button" type="button">管理员登录</button>
           <button id="fieldSettingsButton" class="button admin-only hidden" type="button">自定义词条</button>
           <button id="larkSourcesButton" class="button admin-only hidden" type="button">飞书数据源</button>
-          <button id="userManagementButton" class="button admin-only hidden" type="button">权限管理</button>
+          <button id="userManagementButton" class="button admin-only hidden" type="button">管理员审批</button>
           <button id="addRecordButton" class="button admin-only hidden" type="button">添加数据</button>
           <button id="importButton" class="button primary admin-only hidden" type="button">上传 Excel</button>
           <button id="refreshButton" class="button admin-only" type="button">刷新</button>
@@ -60,24 +64,33 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
           </div>
         </div>
         <div class="login-card">
-          <div class="login-copy">
-            <p class="eyebrow">选择入口</p>
-            <h2>进入交付管线</h2>
-            <p>企业成员使用飞书登录后自动注册；管理员也可以进入自己的需求工作台。</p>
-            <div class="login-actions">
-              <button id="requesterLoginButton" class="login-entry primary" type="button">
-                <span>需求方登录</span>
-                <small>查看我的需求进展</small>
-              </button>
-              <button id="requesterRegisterButton" class="login-entry" type="button">
-                <span>需求方注册</span>
-                <small>创建账号并提交需求</small>
-              </button>
-              <button id="adminLoginButton" class="login-entry" type="button">
-                <span>管理员登录</span>
-                <small>维护台账与负责人视图</small>
-              </button>
+          <div class="login-card-head">
+            <div class="login-copy">
+              <p class="eyebrow">身份入口</p>
+              <h2>进入交付管线</h2>
+              <p>企业成员使用飞书登录后自动注册；管理员也可以进入自己的需求工作台。</p>
             </div>
+            <div class="login-protocol" aria-label="身份验证方式">
+              <i aria-hidden="true"></i>
+              <div>
+                <span id="authMethodLabel">Feishu OAuth</span>
+                <small id="authMethodHint">企业身份认证</small>
+              </div>
+            </div>
+          </div>
+          <div class="login-actions">
+            <button id="requesterLoginButton" class="login-entry primary" type="button">
+              <span>需求方登录</span>
+              <small>查看我的需求进展</small>
+            </button>
+            <button id="requesterRegisterButton" class="login-entry" type="button">
+              <span>需求方注册</span>
+              <small>创建账号并提交需求</small>
+            </button>
+            <button id="adminLoginButton" class="login-entry" type="button">
+              <span>管理员登录</span>
+              <small>维护台账与负责人视图</small>
+            </button>
           </div>
         </div>
       </section>
@@ -327,10 +340,17 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
         <div>
           <div class="dialog-head">
             <div>
-              <h2>权限管理</h2>
-              <p>为已登录过的企业成员叠加交付管理员权限；所有成员始终保留需求方身份。</p>
+              <h2>管理员审批</h2>
+              <p>仅超级管理员可以任命或撤销交付管理员；成员始终保留需求方身份。</p>
             </div>
             <button id="closeUserManagementDialog" class="icon-button" type="button" title="关闭">×</button>
+          </div>
+          <div class="user-management-toolbar">
+            <label>
+              <span>查找企业成员</span>
+              <input id="userManagementSearch" type="search" placeholder="输入姓名、部门或邮箱" autocomplete="off" />
+            </label>
+            <span id="userManagementSummary" class="muted-label">0 位成员</span>
           </div>
           <div id="userManagementList" class="user-management-list"></div>
           <div class="dialog-actions">

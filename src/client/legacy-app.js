@@ -244,7 +244,9 @@ let state = {
   draggedField: "",
   larkSources: [],
   larkSyncIntervalMs: 300000,
+  larkSyncStatus: {},
   adminUsers: [],
+  adminUserQuery: "",
   importPreview: null,
   importFile: null
 };
@@ -1225,42 +1227,66 @@ async function loadFieldPreferences() {
 async function openUserManagement() {
   const result = await fetchJson("/api/admin/users");
   state.adminUsers = result.users || [];
+  state.adminUserQuery = "";
+  el("userManagementSearch").value = "";
   renderUserManagement();
   el("userManagementDialog").showModal();
 }
 
 function renderUserManagement() {
-  el("userManagementList").innerHTML = state.adminUsers.length ? state.adminUsers.map((user) => {
+  const query = normalizeText(state.adminUserQuery);
+  const users = state.adminUsers.filter((user) => !query || normalizeText([
+    user.name,
+    user.department,
+    user.email
+  ].filter(Boolean).join(" ")).includes(query));
+  const adminCount = state.adminUsers.filter((user) => userRoles(user).includes("delivery_admin")).length;
+  el("userManagementSummary").textContent = query
+    ? `${users.length} 位匹配成员`
+    : `${state.adminUsers.length} 位成员 · ${adminCount} 位交付管理员`;
+  el("userManagementList").innerHTML = users.length ? users.map((user) => {
     const roles = userRoles(user);
     const superAdmin = roles.includes("super_admin");
     const deliveryAdmin = roles.includes("delivery_admin");
     return `
       <article class="user-management-row">
-        <div>
+        <div class="user-profile">
           <strong>${escapeHtml(user.name || "未命名用户")}</strong>
           <span>${escapeHtml([user.department, user.email, user.openId].filter(Boolean).join(" · "))}</span>
         </div>
         <div class="user-role-controls">
           <span class="role-badge">需求方</span>
-          ${superAdmin ? `<span class="role-badge super">超级管理员</span>` : `
-            <label class="role-toggle">
-              <input type="checkbox" data-delivery-role="${escapeAttr(user.openId)}" ${deliveryAdmin ? "checked" : ""} />
-              <span>交付管理员</span>
-            </label>
-            <button class="button mini" type="button" data-save-user-role="${escapeAttr(user.openId)}">保存</button>
-          `}
+          ${superAdmin
+            ? `<span class="role-badge super">超级管理员</span>`
+            : deliveryAdmin
+              ? `<span class="role-badge admin">交付管理员</span>
+                <button class="button mini danger-action" type="button" data-admin-action="revoke" data-admin-open-id="${escapeAttr(user.openId)}">撤销管理员</button>`
+              : `<span class="role-badge pending">待审批成员</span>
+                <button class="button mini primary" type="button" data-admin-action="grant" data-admin-open-id="${escapeAttr(user.openId)}">任命为管理员</button>`
+          }
         </div>
       </article>`;
-  }).join("") : `<div class="empty compact">暂无用户；成员首次通过飞书登录后会出现在这里。</div>`;
+  }).join("") : `<div class="empty compact">${query ? "没有匹配的企业成员。" : "暂无用户；成员首次通过飞书登录后会出现在这里。"}</div>`;
 }
 
-async function saveUserRoles(openId) {
-  const checkbox = el("userManagementList").querySelector(`input[data-delivery-role="${CSS.escape(openId)}"]`);
-  const roles = checkbox?.checked ? ["requester", "delivery_admin"] : ["requester"];
+async function updateAdminAccess(openId, action) {
+  const user = state.adminUsers.find((item) => item.openId === openId);
+  if (!user) return;
+  const granting = action === "grant";
+  const confirmed = window.confirm(
+    granting
+      ? `确认任命“${user.name || "该成员"}”为交付管理员？`
+      : `确认撤销“${user.name || "该成员"}”的交付管理员权限？`
+  );
+  if (!confirmed) return;
+  const roles = granting ? ["requester", "delivery_admin"] : ["requester"];
   const result = await fetchJson(`/api/admin/users/${encodeURIComponent(openId)}/role`, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ roles })
+    body: JSON.stringify({
+      roles,
+      note: granting ? "超级管理员审批通过" : "超级管理员撤销权限"
+    })
   });
   state.adminUsers = state.adminUsers.map((user) => user.openId === openId ? result.user : user);
   renderUserManagement();
@@ -1362,18 +1388,25 @@ async function openLarkSources() {
   const result = await fetchJson("/api/sync/lark/sources");
   state.larkSources = result.sources || [];
   state.larkSyncIntervalMs = Number(result.intervalMs || 300000);
+  state.larkSyncStatus = result.status || {};
   const minutes = Math.max(1, Math.round(state.larkSyncIntervalMs / 60000));
-  el("larkSourcesHint").textContent = `服务启动后立即同步，之后每 ${minutes} 分钟自动增量同步；“刷新”只重新读取数据库。`;
-  el("larkSourcesList").innerHTML = state.larkSources.map((source) => {
+  const syncState = state.larkSyncStatus.configured
+    ? `同步服务已启用${state.larkSyncStatus.lastSyncedAt ? ` · 最近同步 ${new Date(state.larkSyncStatus.lastSyncedAt).toLocaleString("zh-CN", { hour12: false })}` : ""}`
+    : "同步服务尚未完整配置";
+  el("larkSourcesHint").textContent = `${syncState}；服务启动后立即同步，之后每 ${minutes} 分钟自动增量同步。`;
+  el("larkSourcesList").innerHTML = state.larkSources.map((source, index) => {
     const url = safeExternalUrl(source.url);
     return `
       <article class="lark-source-row">
-        <div>
-          <strong>${escapeHtml(source.source)}</strong>
-          <span>${source.configured ? escapeHtml(source.tableId) : "尚未配置 table_id"}${source.viewId ? ` · ${escapeHtml(source.viewId)}` : ""}</span>
+        <div class="lark-source-copy">
+          <b>${String(index + 1).padStart(2, "0")}</b>
+          <div>
+            <strong>${escapeHtml(source.source)}</strong>
+            <span>${source.configured ? escapeHtml(source.tableId) : "尚未配置 table_id"}${source.viewId ? ` · ${escapeHtml(source.viewId)}` : ""}</span>
+          </div>
         </div>
         <div class="lark-source-actions">
-          <span class="source-state ${source.configured ? "ready" : "missing"}">${source.configured ? "已接入同步" : "待配置"}</span>
+          <span class="source-state ${source.configured ? "ready" : "missing"}">${source.configured ? "表已配置" : "待配置"}</span>
           ${url ? `<a class="button mini" href="${escapeAttr(url)}" target="_blank" rel="noreferrer">打开在线表格</a>` : `<button class="button mini" type="button" disabled>未配置链接</button>`}
         </div>
       </article>`;
@@ -1469,6 +1502,11 @@ function updateModeUI() {
   document.body.classList.toggle("admin-mode", state.adminMode);
   el("modeButton").textContent = state.authRole ? "退出登录" : "管理员登录";
   el("modeButton").classList.toggle("primary", state.adminMode);
+  el("sessionContext").classList.toggle("hidden", !state.authRole);
+  el("sessionUserName").textContent = state.currentUser?.name || "-";
+  el("sessionRoleLabel").textContent = state.adminMode
+    ? (isSuperAdmin() ? "超级管理员" : "交付管理员")
+    : "需求方";
   updateLoginGate();
 }
 
@@ -1484,12 +1522,14 @@ function updateLoginGate() {
   if (copy) {
     copy.textContent = oauthMode
       ? "需求方登录后查看个人进展；仅预先配置的负责人可进入对应工作台。"
-      : "需求方可注册或登录后查看自己的需求进展并提交新需求，管理员维护台账和负责人视图。";
+      : "需求方登录后查看自己的需求进展并提交新需求，管理员维护台账和负责人视图。";
   }
   if (requesterLoginLabel) requesterLoginLabel.textContent = "需求方登录";
   if (requesterLoginHint) requesterLoginHint.textContent = oauthMode ? "使用飞书账号验证身份" : "查看我的需求进展";
   if (adminLoginLabel) adminLoginLabel.textContent = oauthMode ? "管理员登录" : "管理员登录";
   if (adminLoginHint) adminLoginHint.textContent = oauthMode ? "仅已配置管理员可进入" : "维护台账与负责人视图";
+  el("authMethodLabel").textContent = oauthMode ? "Feishu OAuth" : "Local Preview";
+  el("authMethodHint").textContent = oauthMode ? "企业身份认证" : "本地演示身份";
   el("requesterRegisterButton").classList.toggle("hidden", oauthMode);
 
   if (oauthMode && el("requesterAuthDialog").open) {
@@ -1854,8 +1894,13 @@ el("workspaceModeButton").addEventListener("click", async () => {
 el("closeUserManagementDialog").addEventListener("click", () => el("userManagementDialog").close());
 el("cancelUserManagement").addEventListener("click", () => el("userManagementDialog").close());
 el("userManagementList").addEventListener("click", (event) => {
-  const openId = event.target.closest("button[data-save-user-role]")?.dataset.saveUserRole;
-  if (openId) saveUserRoles(openId).catch((error) => alert(error.message));
+  const button = event.target.closest("button[data-admin-action]");
+  if (!button) return;
+  updateAdminAccess(button.dataset.adminOpenId, button.dataset.adminAction).catch((error) => alert(error.message));
+});
+el("userManagementSearch").addEventListener("input", (event) => {
+  state.adminUserQuery = event.target.value;
+  renderUserManagement();
 });
 el("adminTabs").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-view]");

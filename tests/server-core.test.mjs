@@ -7,6 +7,7 @@ import { demandToLedgerFields, requesterRecords } from "../dist/server/core/ledg
 import { hasAdminRole, normalizeUserRoles, primaryUserRole } from "../dist/server/core/user-roles.js";
 import { LarkOAuthService } from "../dist/server/auth/lark-oauth.service.js";
 import { LarkBaseSyncService } from "../dist/server/sync/lark-base-sync.service.js";
+import { LedgerController } from "../dist/server/ledger/ledger.controller.js";
 
 function dataset(rows) {
   const names = [...new Set(rows.flatMap((row) => Object.keys(row)))];
@@ -77,6 +78,60 @@ test("administrator roles always retain requester capability", () => {
   const user = { openId: "ou_test", name: "管理员", email: "", department: "", role: primaryUserRole(roles), roles };
   assert.deepEqual(roles, ["delivery_admin", "requester"]);
   assert.equal(hasAdminRole(user), true);
+});
+
+test("super administrator appointment updates roles and writes an audit log", async () => {
+  const superAdmin = {
+    openId: "ou_super",
+    name: "超级管理员",
+    email: "",
+    department: "",
+    role: "super_admin",
+    roles: ["super_admin", "requester"]
+  };
+  const target = {
+    openId: "ou_member",
+    name: "测试成员",
+    email: "",
+    department: "",
+    role: "requester",
+    roles: ["requester"]
+  };
+  let storedRoles = target.roles;
+  const logs = [];
+  const controller = new LedgerController(
+    {
+      findUserByOpenId: async () => target,
+      updateUserRoles: async (_openId, roles) => {
+        storedRoles = roles;
+        return { ...target, role: "delivery_admin", roles };
+      },
+      appendLog: async (log) => logs.push(log)
+    },
+    {
+      sessionCookieName: "delivery_session",
+      verifyToken: () => superAdmin,
+      isAdminUser: () => true,
+      hasRole: (user, role) => user?.roles?.includes(role)
+    },
+    {},
+    {},
+    {},
+    {}
+  );
+
+  const result = await controller.updateUserRole(
+    { headers: { cookie: "delivery_session=test" } },
+    undefined,
+    target.openId,
+    { roles: ["requester", "delivery_admin"], note: "测试审批" }
+  );
+
+  assert.deepEqual(storedRoles, ["requester", "delivery_admin"]);
+  assert.deepEqual(result.user.roles, ["requester", "delivery_admin"]);
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].type, "管理员审批通过");
+  assert.equal(logs[0].record_id, "user:ou_member");
 });
 
 test("three Feishu tables expose stable online links and sync in authority order", () => {

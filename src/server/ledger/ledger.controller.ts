@@ -391,6 +391,7 @@ export class LedgerController {
     return {
       ok: true,
       intervalMs: Math.max(Number(process.env.LARK_SYNC_INTERVAL_MS || 300_000), 60_000),
+      status: this.larkSync.status(),
       sources: this.larkSync.sourceConfigurations()
     };
   }
@@ -439,9 +440,10 @@ export class LedgerController {
     @Req() request: Request,
     @Headers("x-admin-token") token: string | undefined,
     @Param("openId") openId: string,
-    @Body() payload: { role?: UserRole; roles?: UserRole[] }
+    @Body() payload: { role?: UserRole; roles?: UserRole[]; note?: string }
   ) {
     this.requireSuperAdmin(request, token);
+    const actor = this.adminUser(request, token);
     const allowed: UserRole[] = ["requester", "delivery_admin", "super_admin"];
     const roles = Array.isArray(payload.roles) ? payload.roles : payload.role ? [payload.role] : [];
     if (!roles.length || roles.some((role) => !allowed.includes(role))) {
@@ -457,6 +459,17 @@ export class LedgerController {
     }
     const user = await this.store.updateUserRoles(openId, roles);
     if (!user) throw new HttpException({ ok: false, message: "用户不存在或数据库未连接" }, HttpStatus.NOT_FOUND);
+    const beforeRoles = target?.roles?.length ? target.roles : target?.role ? [target.role] : ["requester"];
+    await this.store.appendLog(createLog({
+      record_id: `user:${openId}`,
+      type: roles.includes("delivery_admin") ? "管理员审批通过" : "管理员权限撤销",
+      field: "用户角色",
+      before: beforeRoles.join("、"),
+      after: roles.join("、"),
+      actor: actor?.name || "超级管理员",
+      role: "super_admin",
+      note: String(payload.note || "超级管理员通过权限管理页面操作").slice(0, 200)
+    }));
     return { ok: true, user };
   }
 

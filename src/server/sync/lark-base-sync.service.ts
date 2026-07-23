@@ -26,6 +26,8 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
   private timer: NodeJS.Timeout | null = null;
   private syncing = false;
   private resolvedAppToken = "";
+  private lastSyncedAt = "";
+  private lastError = "";
 
   constructor(
     private readonly store: LedgerStoreService,
@@ -53,6 +55,15 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
       && this.sourceConfigurations().some((source) => source.configured)
       && this.lark.isBotConfigured()
     );
+  }
+
+  status() {
+    return {
+      configured: this.isConfigured(),
+      syncing: this.syncing,
+      lastSyncedAt: this.lastSyncedAt,
+      lastError: this.lastError
+    };
   }
 
   sourceConfigurations(): LarkSyncSource[] {
@@ -110,7 +121,12 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
         await this.queue.enqueue("dataset.synced", { source: source.source, count: incoming.records.length });
         results.push({ source: source.source, tableId: source.tableId, batch });
       }
+      this.lastSyncedAt = new Date().toISOString();
+      this.lastError = "";
       return results;
+    } catch (error) {
+      this.lastError = error instanceof Error ? error.message : "飞书 Base 同步失败";
+      throw error;
     } finally {
       this.syncing = false;
     }
