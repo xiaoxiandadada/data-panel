@@ -371,6 +371,50 @@ test("three Feishu business tables merge serially", async () => {
   }
 });
 
+test("one inaccessible Feishu table does not block the other data sources", async () => {
+  const keys = [
+    "LARK_BASE_TOKEN",
+    "LARK_LEDGER_TABLE_ID",
+    "LARK_245_TABLE_ID",
+    "LARK_GAOFENG_TABLE_ID"
+  ];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  Object.assign(process.env, {
+    LARK_BASE_TOKEN: "base-token",
+    LARK_LEDGER_TABLE_ID: "ledger-table",
+    LARK_245_TABLE_ID: "245-table",
+    LARK_GAOFENG_TABLE_ID: "gaofeng-table"
+  });
+  let stored = dataset([]);
+  const service = new LarkBaseSyncService(
+    {
+      readDataset: async () => stored,
+      saveDataset: async (next) => { stored = next; },
+      appendImportBatch: async () => {}
+    },
+    {
+      isBotConfigured: () => true,
+      listBaseDataset: async (_appToken, tableId) => {
+        if (tableId === "gaofeng-table") throw new Error("not_found");
+        return dataset([{ "任务代码": tableId, "项目名称": tableId }]);
+      }
+    },
+    { enqueue: async () => {} }
+  );
+  try {
+    const results = await service.syncAll("测试");
+    assert.deepEqual(results.map((item) => item.source), ["总台账", "245"]);
+    assert.equal(stored.records.length, 2);
+    assert.match(service.status().lastError, /高峰加入：not_found/);
+    assert.equal(service.status().sources.find((source) => source.source === "高峰加入").lastError, "not_found");
+  } finally {
+    for (const key of keys) {
+      if (previous[key] == null) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+});
+
 test("Feishu sync emits one application-bot event for a real status change", async () => {
   const keys = [
     "LARK_BASE_TOKEN",
@@ -634,6 +678,53 @@ test("Feishu administrator search uses tenant contact directory APIs", async () 
       avatar: undefined
     }]);
     assert.equal(requests.some((url) => url?.startsWith("/open-apis/search/v1/user")), false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    for (const key of keys) {
+      if (previous[key] == null) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+});
+
+test("Feishu administrator search reports redacted contact field permissions", async () => {
+  const server = createServer((request, response) => {
+    response.setHeader("content-type", "application/json");
+    if (request.url === "/open-apis/auth/v3/tenant_access_token/internal") {
+      response.end(JSON.stringify({ code: 0, tenant_access_token: "tenant-token", expire: 3600 }));
+      return;
+    }
+    if (request.url?.startsWith("/open-apis/contact/v3/departments/0/children")) {
+      response.end(JSON.stringify({
+        code: 0,
+        data: {
+          has_more: false,
+          items: [{ open_department_id: "od_delivery" }]
+        }
+      }));
+      return;
+    }
+    response.statusCode = 404;
+    response.end(JSON.stringify({ code: 404, msg: "not found" }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const host = `http://127.0.0.1:${address.port}`;
+  const keys = ["LARK_APP_ID", "LARK_APP_SECRET", "LARK_REDIRECT_URI", "LARK_API_HOST"];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  Object.assign(process.env, {
+    LARK_APP_ID: "test-app",
+    LARK_APP_SECRET: "test-secret",
+    LARK_REDIRECT_URI: `${host}/callback`,
+    LARK_API_HOST: host
+  });
+  try {
+    const lark = new LarkOAuthService();
+    await assert.rejects(
+      () => lark.searchUsers("顾语莺"),
+      /contact:department\.base:readonly/
+    );
   } finally {
     await new Promise((resolve) => server.close(resolve));
     for (const key of keys) {

@@ -1419,6 +1419,7 @@ async function openLarkSources() {
   el("larkSourcesList").innerHTML = state.larkSources.map((source, index) => {
     const url = safeExternalUrl(source.url);
     const batch = source.lastBatch;
+    const sourceError = String(source.status?.lastError || "").trim();
     return `
       <article class="lark-source-row">
         <div class="lark-source-copy">
@@ -1427,10 +1428,11 @@ async function openLarkSources() {
             <strong>${escapeHtml(source.source)}</strong>
             <span>${source.configured ? escapeHtml(source.tableId) : "尚未配置 table_id"}${source.viewId ? ` · ${escapeHtml(source.viewId)}` : ""}</span>
             <span>${batch ? `最近读取 ${Number(batch.total || 0)} 条 · ${new Date(batch.createdAt).toLocaleString("zh-CN", { hour12: false })}` : "尚无成功同步批次"}</span>
+            ${sourceError ? `<span class="source-error">同步失败：${escapeHtml(sourceError)}</span>` : ""}
           </div>
         </div>
         <div class="lark-source-actions">
-          <span class="source-state ${source.configured ? "ready" : "missing"}">${source.configured ? "表已配置" : "待配置"}</span>
+          <span class="source-state ${sourceError ? "missing" : source.configured ? "ready" : "missing"}">${sourceError ? "需处理" : source.configured ? "表已配置" : "待配置"}</span>
           ${url ? `<a class="button mini" href="${escapeAttr(url)}" target="_blank" rel="noreferrer">打开在线表格</a>` : `<button class="button mini" type="button" disabled>未配置链接</button>`}
         </div>
       </article>`;

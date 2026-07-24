@@ -2055,6 +2055,10 @@ select {
   overflow-wrap: anywhere;
 }
 
+.lark-source-row .source-error {
+  color: var(--danger);
+}
+
 .lark-source-actions {
   display: flex;
   align-items: center;

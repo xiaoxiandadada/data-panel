@@ -47,6 +47,7 @@ export class LedgerController {
       mongodb: this.store.isMongoReady() ? "ready" : "fallback-json",
       redis: this.queue.isReady() ? "ready" : "disabled",
       larkSync: this.larkSync.isConfigured() ? "configured" : "disabled",
+      larkSyncStatus: this.larkSync.status(),
       satisfactionAutoGoodDays: this.satisfaction.getGraceDays()
     };
   }
@@ -415,12 +416,14 @@ export class LedgerController {
   async larkSyncSources(@Req() request: Request, @Headers("x-admin-token") token?: string) {
     this.requireAdminUser(request, token);
     const batches = (await this.store.readImportBatches(100)).filter((batch) => batch.mode === "lark");
+    const status = this.larkSync.status();
     return {
       ok: true,
       intervalMs: Math.max(Number(process.env.LARK_SYNC_INTERVAL_MS || 300_000), 60_000),
-      status: this.larkSync.status(),
+      status,
       sources: this.larkSync.sourceConfigurations().map((source) => ({
         ...source,
+        status: status.sources.find((item) => item.tableId === source.tableId) || null,
         lastBatch: batches.find((batch) => batch.source === source.source) || null
       }))
     };

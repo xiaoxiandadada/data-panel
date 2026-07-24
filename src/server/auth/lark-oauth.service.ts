@@ -258,6 +258,11 @@ export class LarkOAuthService {
     departmentUrl.searchParams.set("fetch_child", "true");
     departmentUrl.searchParams.set("page_size", "50");
     const departments = await this.pagedDirectoryItems(departmentUrl, token, "飞书部门通讯录读取失败");
+    if (departments.length && !departments.some((department) => cleanEnv(department.name))) {
+      throw new Error(
+        "飞书部门通讯录仅返回 ID，应用还需开通“获取部门基础信息”（contact:department.base:readonly）"
+      );
+    }
     const departmentNames = new Map<string, string>([["0", "根部门"]]);
     departments.forEach((department) => {
       const id = cleanEnv(department.open_department_id || department.department_id);
@@ -276,6 +281,15 @@ export class LarkOAuthService {
         return this.pagedDirectoryItems(userUrl, token, "飞书成员通讯录读取失败");
       }));
       rawUsers.push(...pages.flat());
+    }
+
+    if (rawUsers.length && !rawUsers.some((item) => {
+      const user = item.user || item;
+      return cleanEnv(user.name || user.cn_name || user.en_name || user.display_name || user.email);
+    })) {
+      throw new Error(
+        "飞书成员通讯录仅返回 ID，应用还需开通“获取用户基本信息”（contact:user.base:readonly）"
+      );
     }
 
     const usersById = new Map<string, LarkContactUser>();

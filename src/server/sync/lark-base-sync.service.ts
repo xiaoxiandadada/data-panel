@@ -13,6 +13,13 @@ export interface LarkSyncResult {
   batch: ImportBatch;
 }
 
+export interface LarkSyncSourceStatus {
+  source: string;
+  tableId: string;
+  lastSyncedAt: string;
+  lastError: string;
+}
+
 export interface LarkSyncSource {
   key: "ledger" | "project-245" | "gaofeng";
   source: string;
@@ -29,6 +36,7 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
   private syncing = false;
   private syncQueue: Promise<void> = Promise.resolve();
   private readonly pendingEventSources = new Map<LarkSyncSource["key"], string>();
+  private readonly sourceStatuses = new Map<LarkSyncSource["key"], LarkSyncSourceStatus>();
   private resolvedAppToken = "";
   private lastSyncedAt = "";
   private lastError = "";
@@ -69,7 +77,15 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
       eventPushConfigured: Boolean(String(process.env.LARK_BASE_WEBHOOK_SECRET || "").trim()),
       pendingEventCount: this.pendingEventSources.size,
       lastSyncedAt: this.lastSyncedAt,
-      lastError: this.lastError
+      lastError: this.lastError,
+      sources: this.sourceConfigurations().map((source) => (
+        this.sourceStatuses.get(source.key) || {
+          source: source.source,
+          tableId: source.tableId,
+          lastSyncedAt: "",
+          lastError: ""
+        }
+      ))
     };
   }
 
@@ -173,31 +189,53 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
     try {
       const appToken = await this.baseAppToken();
       const results: LarkSyncResult[] = [];
+      const errors: string[] = [];
       const initialDataset = await this.store.readDataset();
       const notifyStatusChanges = initialDataset.records.length > 0;
       for (const source of sources) {
-        const incoming = await this.lark.listBaseDataset(appToken, source.tableId, source.viewId);
-        const existing = await this.store.readDataset();
-        const merged = mergeImportedDataset(existing, incoming, source.source);
-        const batch: ImportBatch = {
-          id: randomUUID(),
-          source: source.source,
-          fileName: source.tableId,
-          mode: "lark",
-          ...merged.summary,
-          actor,
-          createdAt: new Date().toISOString()
-        };
-        await this.store.saveDataset(merged.dataset);
-        await this.store.appendImportBatch(batch);
-        if (notifyStatusChanges) {
-          await this.enqueueStatusChanges(existing.records, merged.dataset.records, incoming.records, source.source);
+        try {
+          const incoming = await this.lark.listBaseDataset(appToken, source.tableId, source.viewId);
+          const existing = await this.store.readDataset();
+          const merged = mergeImportedDataset(existing, incoming, source.source);
+          const batch: ImportBatch = {
+            id: randomUUID(),
+            source: source.source,
+            fileName: source.tableId,
+            mode: "lark",
+            ...merged.summary,
+            actor,
+            createdAt: new Date().toISOString()
+          };
+          await this.store.saveDataset(merged.dataset);
+          await this.store.appendImportBatch(batch);
+          if (notifyStatusChanges) {
+            await this.enqueueStatusChanges(existing.records, merged.dataset.records, incoming.records, source.source);
+          }
+          await this.queue.enqueue("dataset.synced", { source: source.source, count: incoming.records.length });
+          const syncedAt = new Date().toISOString();
+          this.sourceStatuses.set(source.key, {
+            source: source.source,
+            tableId: source.tableId,
+            lastSyncedAt: syncedAt,
+            lastError: ""
+          });
+          results.push({ source: source.source, tableId: source.tableId, batch });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "飞书 Base 同步失败";
+          const sourceError = `${source.source}：${message}`;
+          errors.push(sourceError);
+          this.sourceStatuses.set(source.key, {
+            source: source.source,
+            tableId: source.tableId,
+            lastSyncedAt: this.sourceStatuses.get(source.key)?.lastSyncedAt || "",
+            lastError: message
+          });
+          console.warn(`Lark Base source sync failed: ${sourceError}`);
         }
-        await this.queue.enqueue("dataset.synced", { source: source.source, count: incoming.records.length });
-        results.push({ source: source.source, tableId: source.tableId, batch });
       }
-      this.lastSyncedAt = new Date().toISOString();
-      this.lastError = "";
+      if (!results.length && errors.length) throw new Error(errors.join("；"));
+      if (results.length) this.lastSyncedAt = new Date().toISOString();
+      this.lastError = errors.join("；");
       return results;
     } catch (error) {
       this.lastError = error instanceof Error ? error.message : "飞书 Base 同步失败";
