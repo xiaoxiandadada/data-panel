@@ -233,7 +233,7 @@ function visibleAdminColumns() {
   const configured = (state.fieldPreferences.fieldOrder || []).filter((field) => state.fields.some((item) => (item.name || item.id) === field));
   const source = configured.length ? configured : TABLE_COLUMNS;
   const visible = orderAndPinColumns([...new Set(source)].filter((field) => !hidden.has(field)));
-  const fixed = (state.fieldPreferences.pinnedFields || []).filter((field) => visible.includes(field)).slice(0, 4);
+  const fixed = (state.fieldPreferences.pinnedFields || []).filter((field) => visible.includes(field));
   return fixed.length ? fixed : visible;
 }
 
@@ -241,11 +241,12 @@ function orderAndPinColumns(columns) {
   const allowed = new Set(columns);
   const preferred = (state.fieldPreferences.fieldOrder || []).filter((field) => allowed.has(field));
   const ordered = [...preferred, ...columns.filter((field) => !preferred.includes(field))];
-  const pinned = (state.fieldPreferences.pinnedFields || []).filter((field) => allowed.has(field)).slice(0, 4);
+  const pinned = (state.fieldPreferences.pinnedFields || []).filter((field) => allowed.has(field));
   return [...pinned, ...ordered.filter((field) => !pinned.includes(field))];
 }
 
 function pinnedColumnPresentation(column, columns) {
+  // Keep only the first four focus fields sticky so a large custom view remains scrollable.
   const configured = new Set((state.fieldPreferences.pinnedFields || []).slice(0, 4));
   const pinned = columns.filter((item) => configured.has(item)).slice(0, 4);
   const index = pinned.indexOf(column);
@@ -381,7 +382,7 @@ function updateNotice(meta) {
       ? escapeHtml(state.authError)
       : meta.status === "error"
       ? `数据读取失败：${escapeHtml(meta.message || "暂时无法连接服务")}。请确认前端与后端服务均已启动后刷新。`
-      : "当前台账为空。管理员可通过“去飞书添加”维护在线表格，或上传 Excel。";
+      : "当前台账为空。管理员可通过“去总台账添加”维护在线表格，或上传 Excel。";
   } else {
     notice.classList.add("hidden");
   }
@@ -805,7 +806,7 @@ function renderHeaderCell(column, columns = []) {
             <button class="column-action ${state.sortField === column ? "active" : ""}" type="button"
               data-sort-column="${escapeAttr(column)}" title="${escapeAttr(sortLabel)}">${state.sortField === column && state.sortDirection === "desc" ? "↓" : "↑"}</button>
             <button class="column-action ${pinned ? "active" : ""}" type="button"
-              data-pin-column="${escapeAttr(column)}" title="${pinned ? "取消固定并恢复常规视图" : "固定后仅显示所选词条"}">⌖</button>
+              data-pin-column="${escapeAttr(column)}" title="${pinned ? "从常用视图移除" : "加入常用视图并仅显示所选词条"}">⌖</button>
             <button class="column-action" type="button" data-hide-column="${escapeAttr(column)}" title="隐藏列">−</button>
           </span>
         </span>
@@ -1284,7 +1285,7 @@ function fieldSettingRow(field, visible) {
       <div class="field-order-actions">
         <button class="icon-button mini-icon" type="button" data-move-field="up" title="上移" aria-label="上移 ${escapeAttr(field)}">↑</button>
         <button class="icon-button mini-icon" type="button" data-move-field="down" title="下移" aria-label="下移 ${escapeAttr(field)}">↓</button>
-        ${visible ? `<button class="button mini pin-field ${pinned ? "active" : ""}" type="button" data-pin-field title="${pinned ? "取消固定" : "固定后仅显示所选词条"}">${pinned ? "取消固定" : "固定"}</button>` : ""}
+        ${visible ? `<button class="button mini pin-field ${pinned ? "active" : ""}" type="button" data-pin-field title="${pinned ? "从常用视图移除" : "加入常用视图"}">${pinned ? "移出常用" : "加入常用"}</button>` : ""}
         <button class="button mini field-visibility-button" type="button" data-toggle-field="${visible ? "hidden" : "visible"}"
           title="${visible ? "隐藏词条" : "恢复词条"}" aria-label="${visible ? "隐藏" : "恢复"} ${escapeAttr(field)}">${visible ? "隐藏" : "恢复"}</button>
       </div>
@@ -1322,8 +1323,7 @@ function captureFieldSettings() {
   const visible = [...el("visibleFieldSettings").querySelectorAll("[data-field-setting]")].map((row) => row.dataset.fieldSetting);
   const hidden = [...el("hiddenFieldSettings").querySelectorAll("[data-field-setting]")].map((row) => row.dataset.fieldSetting);
   const pinned = [...el("visibleFieldSettings").querySelectorAll('[data-field-setting][data-pinned="true"]')]
-    .map((row) => row.dataset.fieldSetting)
-    .slice(0, 4);
+    .map((row) => row.dataset.fieldSetting);
   state.fieldPreferences = {
     hiddenFields: hidden,
     fieldOrder: [...visible, ...hidden],
@@ -1367,13 +1367,7 @@ async function hideTableColumn(column) {
 async function togglePinnedTableColumn(column) {
   const pinned = new Set(state.fieldPreferences.pinnedFields || []);
   if (pinned.has(column)) pinned.delete(column);
-  else {
-    if (pinned.size >= 4) {
-      alert("最多固定 4 个词条");
-      return;
-    }
-    pinned.add(column);
-  }
+  else pinned.add(column);
   state.fieldPreferences.pinnedFields = [...pinned];
   await persistFieldPreferences();
 }
@@ -1409,22 +1403,19 @@ function safeExternalUrl(value) {
   }
 }
 
-async function openLarkSources(mode = "sync") {
+async function openLarkSources() {
   const result = await fetchJson("/api/sync/lark/sources");
   state.larkSources = result.sources || [];
   state.larkSyncIntervalMs = Number(result.intervalMs || 300000);
   state.larkSyncStatus = result.status || {};
   const minutes = Math.max(1, Math.round(state.larkSyncIntervalMs / 60000));
-  const addMode = mode === "add";
   const syncState = state.larkSyncStatus.configured
     ? `同步服务已启用${state.larkSyncStatus.lastSyncedAt ? ` · 最近同步 ${new Date(state.larkSyncStatus.lastSyncedAt).toLocaleString("zh-CN", { hour12: false })}` : ""}`
     : "同步服务尚未完整配置";
   const pushState = state.larkSyncStatus.eventPushConfigured ? "飞书变更会秒级触发同步" : "实时推送密钥待配置";
   const syncError = state.larkSyncStatus.lastError ? `；最近同步失败：${state.larkSyncStatus.lastError}` : "";
-  el("larkSourcesTitle").textContent = addMode ? "选择飞书表格" : "飞书在线数据源";
-  el("larkSourcesHint").textContent = addMode
-    ? "选择要维护的数据表，新增和修改操作将在飞书中完成。"
-    : `${syncState}；${pushState}，并每 ${minutes} 分钟自动校准${syncError}。`;
+  el("larkSourcesTitle").textContent = "飞书在线数据源";
+  el("larkSourcesHint").textContent = `${syncState}；${pushState}，并每 ${minutes} 分钟自动校准${syncError}。`;
   el("larkSourcesList").innerHTML = state.larkSources.map((source, index) => {
     const url = safeExternalUrl(source.url);
     const batch = source.lastBatch;
@@ -1440,11 +1431,11 @@ async function openLarkSources(mode = "sync") {
         </div>
         <div class="lark-source-actions">
           <span class="source-state ${source.configured ? "ready" : "missing"}">${source.configured ? "表已配置" : "待配置"}</span>
-          ${url ? `<a class="button mini${addMode ? " primary" : ""}" href="${escapeAttr(url)}" target="_blank" rel="noreferrer">${addMode ? "打开并添加" : "打开在线表格"}</a>` : `<button class="button mini" type="button" disabled>未配置链接</button>`}
+          ${url ? `<a class="button mini" href="${escapeAttr(url)}" target="_blank" rel="noreferrer">打开在线表格</a>` : `<button class="button mini" type="button" disabled>未配置链接</button>`}
         </div>
       </article>`;
   }).join("");
-  el("syncLarkNow").classList.toggle("hidden", addMode || !isSuperAdmin());
+  el("syncLarkNow").classList.toggle("hidden", !isSuperAdmin());
   el("larkSourcesDialog").showModal();
 }
 
@@ -1912,7 +1903,9 @@ async function updateRecord(recordId, patch) {
 
 el("refreshButton").addEventListener("click", loadData);
 el("importButton").addEventListener("click", openImportDialog);
-el("addRecordButton").addEventListener("click", () => openLarkSources("add").catch((error) => alert(error.message)));
+el("addRecordButton").addEventListener("click", () => {
+  window.open("/api/sync/lark/sources/ledger/open", "_blank", "noopener,noreferrer");
+});
 el("fieldSettingsButton").addEventListener("click", openFieldSettings);
 el("larkSourcesButton").addEventListener("click", () => openLarkSources().catch((error) => alert(error.message)));
 el("userManagementButton").addEventListener("click", () => openUserManagement().catch((error) => alert(error.message)));
@@ -2170,13 +2163,7 @@ el("fieldSettingsList").addEventListener("click", (event) => {
     captureFieldSettings();
     const pinned = new Set(state.fieldPreferences.pinnedFields || []);
     if (pinned.has(row.dataset.fieldSetting)) pinned.delete(row.dataset.fieldSetting);
-    else {
-      if (pinned.size >= 4) {
-        alert("最多固定 4 个词条");
-        return;
-      }
-      pinned.add(row.dataset.fieldSetting);
-    }
+    else pinned.add(row.dataset.fieldSetting);
     state.fieldPreferences.pinnedFields = [...pinned];
     renderFieldSettings();
   }

@@ -426,6 +426,30 @@ export class LedgerController {
     };
   }
 
+  @Get("api/sync/lark/sources/:key/open")
+  openLarkSource(
+    @Req() request: Request,
+    @Headers("x-admin-token") token: string | undefined,
+    @Param("key") key: string,
+    @Res() response: Response
+  ) {
+    this.requireAdminUser(request, token);
+    const source = this.larkSync.sourceConfigurations().find((item) => item.key === key);
+    if (!source?.url) {
+      throw new HttpException({ ok: false, message: "飞书数据源链接尚未配置" }, HttpStatus.NOT_FOUND);
+    }
+    let target: URL;
+    try {
+      target = new URL(source.url);
+    } catch {
+      throw new HttpException({ ok: false, message: "飞书数据源链接格式错误" }, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+    if (!["https:", "http:"].includes(target.protocol)) {
+      throw new HttpException({ ok: false, message: "飞书数据源链接协议不受支持" }, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+    response.redirect(target.toString());
+  }
+
   @Post("api/webhooks/lark/base")
   @HttpCode(HttpStatus.ACCEPTED)
   larkBaseWebhook(
@@ -481,8 +505,7 @@ export class LedgerController {
     const hidden = new Set(hiddenFields);
     const pinnedFields = (payload.pinnedFields || [])
       .map(String)
-      .filter((field) => allowed.has(field) && !hidden.has(field))
-      .slice(0, 4);
+      .filter((field) => allowed.has(field) && !hidden.has(field));
     return {
       ok: true,
       preferences: await this.store.saveUserFieldPreferences({ openId: user.openId, hiddenFields, fieldOrder, pinnedFields, updatedAt: "" })

@@ -300,7 +300,7 @@ export class LedgerStoreService implements OnModuleInit {
       openId: preferences.openId,
       hiddenFields: [...new Set(preferences.hiddenFields || [])],
       fieldOrder: [...new Set(preferences.fieldOrder || [])],
-      pinnedFields: [...new Set(preferences.pinnedFields || [])].filter((field) => !(preferences.hiddenFields || []).includes(field)).slice(0, 4),
+      pinnedFields: [...new Set(preferences.pinnedFields || [])].filter((field) => !(preferences.hiddenFields || []).includes(field)),
       updatedAt: new Date().toISOString()
     };
     if (this.mongoReady && this.db) {

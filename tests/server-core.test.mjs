@@ -93,6 +93,45 @@ test("every delivery administrator receives the complete ledger dataset", () => 
   assert.deepEqual(projectDatasetForAdmin(source, admin).records.map((record) => record.fields["项目名称"]), ["甲", "乙"]);
 });
 
+test("administrator custom view preserves more than four selected fields", async () => {
+  const fields = ["项目名称", "获取状态", "隶属部门", "项目对接人", "解决方案负责人", "Sprint"];
+  const admin = {
+    openId: "ou_admin",
+    name: "管理员",
+    role: "delivery_admin",
+    roles: ["delivery_admin"]
+  };
+  let storedPreferences;
+  const controller = new LedgerController(
+    {
+      readDataset: async () => dataset([Object.fromEntries(fields.map((field) => [field, field]))]),
+      saveUserFieldPreferences: async (preferences) => {
+        storedPreferences = preferences;
+        return preferences;
+      }
+    },
+    {
+      sessionCookieName: "delivery_session",
+      verifyToken: () => admin,
+      isAdminUser: () => true
+    },
+    {},
+    {},
+    {},
+    {},
+    {}
+  );
+
+  const result = await controller.updateFieldPreferences(
+    { headers: { cookie: "delivery_session=test" } },
+    undefined,
+    { hiddenFields: [], fieldOrder: fields, pinnedFields: fields }
+  );
+
+  assert.deepEqual(storedPreferences.pinnedFields, fields);
+  assert.deepEqual(result.preferences.pinnedFields, fields);
+});
+
 test("delivery efficiency follows the six-stage Q1 and Q2 calculation rules", () => {
   const source = dataset([
     {
@@ -247,6 +286,45 @@ test("three Feishu business tables expose stable online links", () => {
       else process.env[key] = previous[key];
     }
   }
+});
+
+test("administrator add action redirects to the primary Feishu ledger", () => {
+  const admin = {
+    openId: "ou_admin",
+    name: "管理员",
+    role: "delivery_admin",
+    roles: ["delivery_admin"]
+  };
+  let redirectedTo = "";
+  const controller = new LedgerController(
+    {},
+    {
+      sessionCookieName: "delivery_session",
+      verifyToken: () => admin,
+      isAdminUser: () => true
+    },
+    {},
+    {},
+    {},
+    {
+      sourceConfigurations: () => [{
+        key: "ledger",
+        source: "总台账",
+        url: "https://example.feishu.cn/base/ledger",
+        configured: true
+      }]
+    },
+    {}
+  );
+
+  controller.openLarkSource(
+    { headers: { cookie: "delivery_session=test" } },
+    undefined,
+    "ledger",
+    { redirect: (target) => { redirectedTo = target; } }
+  );
+
+  assert.equal(redirectedTo, "https://example.feishu.cn/base/ledger");
 });
 
 test("three Feishu business tables merge serially", async () => {

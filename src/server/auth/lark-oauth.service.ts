@@ -319,7 +319,11 @@ export class LarkOAuthService {
       });
       const payload = (await response.json().catch(() => null)) as Record<string, any> | null;
       if (!response.ok || !payload || (typeof payload.code === "number" && payload.code !== 0)) {
-        throw new Error(`${errorLabel}：${payload?.msg || payload?.message || response.statusText}`);
+        const detail = cleanEnv(payload?.msg || payload?.message || response.statusText);
+        if (/no dept authority/i.test(detail)) {
+          throw new Error(`${errorLabel}：应用尚未获得通讯录数据范围，请审批通讯录权限并开放所需成员范围`);
+        }
+        throw new Error(`${errorLabel}：${detail}`);
       }
       const pageItems = payload.data?.items;
       if (Array.isArray(pageItems)) items.push(...pageItems);

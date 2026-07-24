@@ -37,7 +37,7 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
           <button id="fieldSettingsButton" class="button admin-only hidden" type="button">自定义词条</button>
           <button id="larkSourcesButton" class="button admin-only hidden" type="button">飞书数据源</button>
           <button id="userManagementButton" class="button admin-only hidden" type="button">管理员设置</button>
-          <button id="addRecordButton" class="button admin-only hidden" type="button">去飞书添加</button>
+          <button id="addRecordButton" class="button admin-only hidden" type="button" title="在飞书中打开数据团队总台账">去总台账添加</button>
           <button id="importButton" class="button primary admin-only hidden" type="button">上传 Excel</button>
           <button id="refreshButton" class="button admin-only" type="button">刷新</button>
         </div>
@@ -309,14 +309,14 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
           <div class="dialog-head">
             <div>
               <h2>自定义词条</h2>
-              <p>可拖动或使用上下按钮排序；固定后台账仅显示固定词条，取消全部固定即可恢复常规视图。</p>
+              <p>常用词条数量不限，设置后台账仅显示所选词条；可拖动或使用上下按钮排序，取消全部常用词条即可恢复完整视图。</p>
             </div>
             <button id="closeFieldSettingsDialog" class="icon-button" type="button" title="关闭">×</button>
           </div>
           <div id="fieldSettingsList" class="field-settings-board">
             <section class="field-settings-column">
               <header>
-                <div><strong>显示词条</strong><span>最多固定 4 个常用词条</span></div>
+                <div><strong>显示词条</strong><span>常用词条数量不限，前 4 个滚动时固定</span></div>
                 <b id="visibleFieldCount">0</b>
               </header>
               <div id="visibleFieldSettings" class="field-drop-zone" data-field-zone="visible"></div>
