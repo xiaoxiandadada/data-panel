@@ -55,6 +55,10 @@ function baseToken() {
   return token;
 }
 
+function tableIdOf(item) {
+  return item?.table_id || item?.tableId || item?.id || "";
+}
+
 const token = baseToken();
 const tableResult = runJson(["base", "+table-list", "--base-token", token, "--as", "user", "--json"]);
 const tables = listFrom(tableResult.data, ["items", "tables", "table_list"]);
@@ -62,7 +66,7 @@ const workflowResult = runJson(["base", "+workflow-list", "--base-token", token,
 const workflows = listFrom(workflowResult.data, ["items", "workflows", "workflow_list"]);
 
 for (const source of sources) {
-  const table = tables.find((item) => item.table_id === source.tableId || item.tableId === source.tableId);
+  const table = tables.find((item) => tableIdOf(item) === source.tableId);
   if (!table) throw new Error(`未找到数据表 ${source.name}（${source.tableId}）`);
   const tableName = table.name || table.table_name || table.tableName;
   if (!tableName) throw new Error(`数据表 ${source.tableId} 缺少名称`);
