@@ -65,6 +65,20 @@ export function normalizeText(value: unknown): string {
   return String(value || "").replace(/\u200B/g, "").trim().toLowerCase();
 }
 
+export const businessKeyFields = ["\u4EFB\u52A1\u4EE3\u7801", "2026\u9700\u6C42\u7F16\u7801", "\u9700\u6C42\u7F16\u7801", "\u9879\u76EE\u540D\u79F0"];
+
+// Identifies the same requirement across the three Feishu tables and Excel imports.
+// Lives in core because both the ledger merge logic and the store index depend on it.
+export function importBusinessKey(fields: Record<string, FieldValue>): string {
+  for (const field of businessKeyFields) {
+    const value = normalizeText(stringifyCell(fields?.[field]));
+    if (value) return `${field}:${value}`;
+  }
+  const proposedAt = normalizeText(stringifyCell(fields?.["\u9700\u6C42\u63D0\u51FA\u65F6\u95F4"]));
+  const department = normalizeText(stringifyCell(fields?.["\u96B6\u5C5E\u90E8\u95E8"]));
+  return `fallback:${proposedAt}:${department}:${normalizeText(JSON.stringify(fields || {}))}`;
+}
+
 export function todayText(): string {
   return new Date().toLocaleDateString("zh-CN", {
     year: "numeric",

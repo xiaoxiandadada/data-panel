@@ -2269,9 +2269,47 @@ el("adminForm").addEventListener("submit", async (event) => {
   await loadData();
 });
 
+// A Base edit reaches MongoDB about a second after the webhook fires, but the page had no way to
+// find out. Poll a counter instead of the dataset so this stays cheap enough to run every few
+// seconds, and only re-download when the counter actually moves.
+const VERSION_POLL_MS = 3000;
+let knownDataVersion = null;
+let versionPollTimer = null;
+
+async function pollDataVersion() {
+  if (document.hidden) return;
+  // Never swap the table out from under an open dialog.
+  if (document.querySelector("dialog[open]")) return;
+  try {
+    const result = await fetchJson(`./api/data/version?t=${Date.now()}`);
+    const version = Number(result?.version || 0);
+    if (knownDataVersion === null) {
+      knownDataVersion = version;
+      return;
+    }
+    if (version === knownDataVersion) return;
+    await loadData();
+    knownDataVersion = version;
+  } catch {
+    // Backend restarting or offline: keep the current data and retry on the next tick.
+  }
+}
+
+function startVersionPolling() {
+  if (versionPollTimer) return;
+  versionPollTimer = setInterval(() => {
+    void pollDataVersion();
+  }, VERSION_POLL_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) void pollDataVersion();
+  });
+}
+
 async function bootstrap() {
   await loadSession();
   await loadData();
+  await pollDataVersion();
+  startVersionPolling();
 }
 
 bootstrap().catch((error) => {

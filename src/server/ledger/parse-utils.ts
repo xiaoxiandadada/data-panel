@@ -1,6 +1,8 @@
 import readXlsxFile from "read-excel-file/node";
 import type { Dataset, FieldValue } from "../core/types.js";
-import { nextRecordId, normalizeText, rowsToDataset, stringifyCell } from "../core/ledger-utils.js";
+import { importBusinessKey, nextRecordId, rowsToDataset, stringifyCell } from "../core/ledger-utils.js";
+
+export { importBusinessKey };
 
 export interface ImportMergeSummary {
   total: number;
@@ -14,8 +16,6 @@ export interface ImportMergeResult {
   dataset: Dataset;
   summary: ImportMergeSummary;
 }
-
-const keyFields = ["任务代码", "2026需求编码", "需求编码", "项目名称"];
 
 function excelCell(value: unknown): FieldValue {
   if (value instanceof Date) {
@@ -37,21 +37,11 @@ export async function parseExcel(buffer: Buffer): Promise<Array<Record<string, F
     .map((row) => Object.fromEntries(headers.map((header, index) => [header, excelCell(row[index])])));
 }
 
-export function importBusinessKey(fields: Record<string, FieldValue>): string {
-  for (const field of keyFields) {
-    const value = normalizeText(stringifyCell(fields?.[field]));
-    if (value) return `${field}:${value}`;
-  }
-  const proposedAt = normalizeText(stringifyCell(fields?.["需求提出时间"]));
-  const department = normalizeText(stringifyCell(fields?.["隶属部门"]));
-  return `fallback:${proposedAt}:${department}:${normalizeText(JSON.stringify(fields || {}))}`;
-}
-
 function mergeSources(before: FieldValue, source: string): string {
   return [...new Set(`${stringifyCell(before)}、${source}`.split(/[、,，]/).map((item) => item.trim()).filter(Boolean))].join("、");
 }
 
-function mergeFields(before: Record<string, FieldValue>, incoming: Record<string, FieldValue>, source: string): Record<string, FieldValue> {
+export function mergeFields(before: Record<string, FieldValue>, incoming: Record<string, FieldValue>, source: string): Record<string, FieldValue> {
   const merged = { ...before };
   for (const [field, value] of Object.entries(incoming || {})) {
     if (stringifyCell(value).trim() !== "") merged[field] = value;

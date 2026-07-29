@@ -2,10 +2,10 @@ import { Injectable, OnApplicationBootstrap, OnModuleDestroy } from "@nestjs/com
 import { randomUUID } from "node:crypto";
 import { LarkOAuthService } from "../auth/lark-oauth.service.js";
 import { stringifyCell } from "../core/ledger-utils.js";
-import type { ImportBatch, LedgerRecord } from "../core/types.js";
+import type { FieldValue, ImportBatch, LedgerRecord } from "../core/types.js";
 import { LedgerStoreService } from "../infra/ledger-store.service.js";
 import { QueueService } from "../infra/queue.service.js";
-import { importBusinessKey, mergeImportedDataset } from "../ledger/parse-utils.js";
+import { importBusinessKey, mergeFields, mergeImportedDataset } from "../ledger/parse-utils.js";
 
 export interface LarkSyncResult {
   source: string;
@@ -29,13 +29,22 @@ export interface LarkSyncSource {
   configured: boolean;
 }
 
+// One table's coalesced webhook events. Record ids accumulate so a burst of edits on the same
+// table costs one round of single-record reads; fullTable is set when an event arrives without a
+// record id, which forces the whole table to be re-read.
+interface PendingTableEvent {
+  actor: string;
+  recordIds: Set<string>;
+  fullTable: boolean;
+}
+
 @Injectable()
 export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDestroy {
   private timer: NodeJS.Timeout | null = null;
   private eventTimer: NodeJS.Timeout | null = null;
   private syncing = false;
   private syncQueue: Promise<void> = Promise.resolve();
-  private readonly pendingEventSources = new Map<LarkSyncSource["key"], string>();
+  private readonly pendingEventSources = new Map<LarkSyncSource["key"], PendingTableEvent>();
   private readonly sourceStatuses = new Map<LarkSyncSource["key"], LarkSyncSourceStatus>();
   private resolvedAppToken = "";
   private lastSyncedAt = "";
@@ -76,6 +85,7 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
       syncing: this.syncing,
       eventPushConfigured: Boolean(String(process.env.LARK_BASE_WEBHOOK_SECRET || "").trim()),
       pendingEventCount: this.pendingEventSources.size,
+      pendingRecordCount: [...this.pendingEventSources.values()].reduce((sum, event) => sum + event.recordIds.size, 0),
       lastSyncedAt: this.lastSyncedAt,
       lastError: this.lastError,
       sources: this.sourceConfigurations().map((source) => (
@@ -151,10 +161,16 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
     return this.enqueueSync(this.sourceConfigurations().filter((item) => item.configured), actor);
   }
 
-  scheduleTableSync(tableId: string, actor = "飞书实时推送"): LarkSyncSource | null {
+  scheduleTableSync(tableId: string, recordId = "", actor = "飞书实时推送"): LarkSyncSource | null {
     const source = this.sourceConfigurations().find((item) => item.configured && item.tableId === tableId);
     if (!source) return null;
-    this.pendingEventSources.set(source.key, actor);
+    const pending = this.pendingEventSources.get(source.key)
+      || { actor, recordIds: new Set<string>(), fullTable: false };
+    pending.actor = actor;
+    const cleanRecordId = String(recordId || "").trim();
+    if (cleanRecordId) pending.recordIds.add(cleanRecordId);
+    else pending.fullTable = true;
+    this.pendingEventSources.set(source.key, pending);
     if (!this.eventTimer) {
       this.eventTimer = setTimeout(() => {
         this.eventTimer = null;
@@ -165,23 +181,27 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
     return source;
   }
 
-  private enqueueSync(sources: LarkSyncSource[], actor: string): Promise<LarkSyncResult[]> {
-    let resolveTask!: (results: LarkSyncResult[]) => void;
+  private enqueueTask<T>(run: () => Promise<T>): Promise<T> {
+    let resolveTask!: (value: T) => void;
     let rejectTask!: (error: unknown) => void;
-    const task = new Promise<LarkSyncResult[]>((resolve, reject) => {
+    const task = new Promise<T>((resolve, reject) => {
       resolveTask = resolve;
       rejectTask = reject;
     });
     this.syncQueue = this.syncQueue
       .then(async () => {
         try {
-          resolveTask(await this.performSync(sources, actor));
+          resolveTask(await run());
         } catch (error) {
           rejectTask(error);
         }
       })
       .catch(() => undefined);
     return task;
+  }
+
+  private enqueueSync(sources: LarkSyncSource[], actor: string): Promise<LarkSyncResult[]> {
+    return this.enqueueTask(() => this.performSync(sources, actor));
   }
 
   private async performSync(sources: LarkSyncSource[], actor: string): Promise<LarkSyncResult[]> {
@@ -272,16 +292,124 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
     }
   }
 
+  /**
+   * Webhook fast path: read only the records the event named and merge them one at a time.
+   * A full-table sync pages every record and rewrites the whole collection, which costs seconds
+   * on the 245 table; this touches one document per event. Any failure falls back to the full
+   * table sync for that source so an event is never silently dropped.
+   */
+  private async performRecordSync(source: LarkSyncSource, recordIds: string[], actor: string): Promise<LarkSyncResult | null> {
+    this.syncing = true;
+    try {
+      const appToken = await this.baseAppToken();
+      const summary = { total: recordIds.length, inserted: 0, updated: 0, unchanged: 0, conflicts: 0 };
+      let missing = 0;
+      // Feishu's single-record read costs ~2s, so a burst of edits is fetched concurrently.
+      // Only the merge stays serial — it is a read-modify-write that must not interleave.
+      const fetched = await this.fetchRecords(appToken, source.tableId, recordIds);
+      for (const incoming of fetched) {
+        if (!incoming) {
+          missing += 1;
+          continue;
+        }
+        const result = await this.store.upsertRecordByBusinessKey(
+          incoming.fields || {},
+          (before) => mergeFields(before, incoming.fields || {}, source.source),
+          {
+            status: "ok",
+            syncedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+            message: `${source.source}：实时同步 ${recordIds.length} 条记录`
+          }
+        );
+        summary[result.action] += 1;
+        // New records carry no prior status, matching the full-sync rule of only notifying on change.
+        if (result.action === "updated") {
+          await this.enqueueRecordStatusChange(result.beforeFields, result.record, source.source);
+        }
+      }
+      const batch: ImportBatch = {
+        id: randomUUID(),
+        source: source.source,
+        fileName: `${source.tableId}（实时 ${recordIds.length} 条）`,
+        mode: "lark",
+        ...summary,
+        actor,
+        createdAt: new Date().toISOString()
+      };
+      await this.store.appendImportBatch(batch);
+      await this.queue.enqueue("dataset.synced", { source: source.source, count: recordIds.length - missing });
+      const syncedAt = new Date().toISOString();
+      this.sourceStatuses.set(source.key, {
+        source: source.source,
+        tableId: source.tableId,
+        lastSyncedAt: syncedAt,
+        lastError: ""
+      });
+      this.lastSyncedAt = syncedAt;
+      return { source: source.source, tableId: source.tableId, batch };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "飞书 Base 单记录同步失败";
+      console.warn(`Lark Base record sync failed, falling back to full table: ${source.source}：${message}`);
+      this.syncing = false;
+      const results = await this.performSync([source], actor);
+      return results[0] || null;
+    } finally {
+      this.syncing = false;
+    }
+  }
+
+  private async fetchRecords(appToken: string, tableId: string, recordIds: string[]): Promise<Array<LedgerRecord | null>> {
+    const results: Array<LedgerRecord | null> = [];
+    // Bounded so a large burst cannot trip Feishu's rate limit.
+    const batchSize = 5;
+    for (let index = 0; index < recordIds.length; index += batchSize) {
+      const batch = recordIds.slice(index, index + batchSize);
+      results.push(...await Promise.all(batch.map((recordId) => this.lark.getBaseRecord(appToken, tableId, recordId))));
+    }
+    return results;
+  }
+
+  private async enqueueRecordStatusChange(
+    beforeFields: Record<string, FieldValue>,
+    record: LedgerRecord,
+    source: string
+  ): Promise<void> {
+    const beforeStatus = stringifyCell(beforeFields?.["获取状态"]).trim();
+    const afterStatus = stringifyCell(record.fields?.["获取状态"]).trim();
+    if (beforeStatus === afterStatus) return;
+    await this.queue.enqueue("record.updated", {
+      recordId: record.record_id,
+      fields: ["获取状态"],
+      beforeStatus: beforeStatus || "未设置",
+      afterStatus: afterStatus || "未设置",
+      source
+    });
+  }
+
   private async flushEventSources(): Promise<void> {
     const pending = new Map(this.pendingEventSources);
     this.pendingEventSources.clear();
     const sources = this.sourceConfigurations().filter((source) => pending.has(source.key));
     if (!sources.length) return;
-    const actor = [...pending.values()].at(-1) || "飞书实时推送";
-    try {
-      await this.enqueueSync(sources, actor);
-    } catch (error) {
-      console.warn(`Lark Base event sync failed: ${(error as Error).message}`);
+    const fullTableSources = sources.filter((source) => pending.get(source.key)?.fullTable);
+    // Each source is awaited on its own: one table failing must not discard the events that
+    // arrived for the others in the same window.
+    for (const source of sources.filter((item) => !pending.get(item.key)?.fullTable)) {
+      const event = pending.get(source.key)!;
+      try {
+        await this.enqueueTask(() => this.performRecordSync(source, [...event.recordIds], event.actor));
+      } catch (error) {
+        // performSync already prefixes the source name.
+        console.warn(`Lark Base record event sync failed: ${(error as Error).message}`);
+      }
+    }
+    if (fullTableSources.length) {
+      const actor = pending.get(fullTableSources.at(-1)!.key)?.actor || "飞书实时推送";
+      try {
+        await this.enqueueSync(fullTableSources, actor);
+      } catch (error) {
+        console.warn(`Lark Base event sync failed: ${(error as Error).message}`);
+      }
     }
     if (this.pendingEventSources.size && !this.eventTimer) {
       this.eventTimer = setTimeout(() => {

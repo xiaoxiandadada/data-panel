@@ -203,6 +203,35 @@ export class LarkOAuthService {
     };
   }
 
+  /**
+   * Single-record read used by the Base webhook path: one request instead of paging the whole
+   * table. Returns null when the record no longer exists (deleted between event and fetch) —
+   * the merge never deletes rows, so the caller can simply skip it.
+   */
+  async getBaseRecord(appToken: string, tableId: string, recordId: string): Promise<LedgerRecord | null> {
+    const cleanAppToken = cleanEnv(appToken);
+    const cleanTableId = cleanEnv(tableId);
+    const cleanRecordId = cleanEnv(recordId);
+    if (!cleanAppToken || !cleanTableId || !cleanRecordId) throw new Error("飞书 Base 单记录读取缺少 app token、table id 或 record id");
+    const token = await this.tenantAccessToken();
+    const url = new URL(
+      `/open-apis/bitable/v1/apps/${encodeURIComponent(cleanAppToken)}/tables/${encodeURIComponent(cleanTableId)}/records/${encodeURIComponent(cleanRecordId)}`,
+      this.apiHost
+    );
+    const response = await fetch(url, { headers: { authorization: `Bearer ${token}` } });
+    const payload = (await response.json().catch(() => null)) as Record<string, any> | null;
+    if (response.status === 404 || payload?.code === 1254043) return null;
+    if (!response.ok || !payload || payload.code !== 0) {
+      throw new Error(`飞书 Base 单记录读取失败：${payload?.msg || payload?.message || response.statusText}`);
+    }
+    const record = payload.data?.record;
+    if (!record) return null;
+    return {
+      record_id: cleanEnv(record.record_id || record.id) || cleanRecordId,
+      fields: record.fields || {}
+    };
+  }
+
   async resolveWikiNodeObjectToken(wikiNodeToken: string): Promise<string> {
     const cleanToken = cleanEnv(wikiNodeToken);
     if (!cleanToken) throw new Error("飞书 Wiki 节点 token 为空");

@@ -1,11 +1,11 @@
 import { Injectable, OnModuleInit } from "@nestjs/common";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MongoClient, type Collection, type Db, type Document } from "mongodb";
 import type { AppUser, Dataset, ImportBatch, LedgerLog, LedgerRecord, NotificationLog, UserFieldPreferences, UserRole } from "../core/types.js";
 import type { FieldValue } from "../core/types.js";
-import { rowsToDataset, stringifyCell } from "../core/ledger-utils.js";
+import { ensureFields, importBusinessKey, nextRecordId, rowsToDataset, stringifyCell } from "../core/ledger-utils.js";
 import { normalizeUserRoles, primaryUserRole } from "../core/user-roles.js";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
@@ -17,13 +17,19 @@ const importBatchPath = resolve(dataDir, "import-batches.json");
 const notificationLogPath = resolve(dataDir, "notification-logs.json");
 
 type AppStateDoc = Document & {
-  key: "meta" | "fields";
-  value: unknown;
+  key: "meta" | "fields" | "version";
+  value?: unknown;
+  // Only present on the "version" doc: bumped on every ledger write so the browser can
+  // detect changes with one tiny request instead of re-downloading the dataset.
+  version?: number;
 };
 
 type LedgerRecordDoc = Document & {
   record_id: string;
   fields: Record<string, FieldValue>;
+  // Cached importBusinessKey(fields) so incremental sync can find its match with an
+  // indexed lookup instead of scanning the whole collection.
+  business_key?: string;
   sort_order: number;
   updated_at: Date;
 };
@@ -46,6 +52,7 @@ export class LedgerStoreService implements OnModuleInit {
   private client: MongoClient | null = null;
   private db: Db | null = null;
   private mongoReady = false;
+  private fileDataVersion = 0;
 
   async onModuleInit() {
     const mongoUri = this.mongoUri();
@@ -105,14 +112,17 @@ export class LedgerStoreService implements OnModuleInit {
       const docs = (dataset.records || []).map((record, index) => ({
         record_id: record.record_id,
         fields: record.fields || {},
+        business_key: importBusinessKey(record.fields || {}),
         sort_order: index,
         updated_at: new Date()
       }));
       if (docs.length) await this.ledgerRecords().insertMany(docs);
+      await this.bumpDataVersion();
       return;
     }
     mkdirSync(dataDir, { recursive: true });
     writeFileSync(dataPath, `${JSON.stringify(dataset, null, 2)}\n`, "utf8");
+    await this.bumpDataVersion();
   }
 
   async appendRecord(record: LedgerRecord): Promise<Dataset> {
@@ -143,6 +153,146 @@ export class LedgerStoreService implements OnModuleInit {
     };
     await this.saveDataset(dataset);
     return { dataset, beforeFields, record };
+  }
+
+  /**
+   * Incremental counterpart to saveDataset: locates one incoming record by business key and
+   * writes only that record, so a single webhook event no longer rewrites the whole collection.
+   * `merge` receives the stored fields (empty object for a new record) and returns the fields to
+   * persist — the merge rule itself stays in the ledger layer, the store only does lookup and write.
+   */
+  async upsertRecordByBusinessKey(
+    fields: Record<string, FieldValue>,
+    merge: (before: Record<string, FieldValue>) => Record<string, FieldValue>,
+    meta: Partial<Dataset["meta"]> = {}
+  ): Promise<{ action: "inserted" | "updated" | "unchanged"; record: LedgerRecord; beforeFields: Record<string, FieldValue> }> {
+    const businessKey = importBusinessKey(fields || {});
+    const current = await this.findRecordByBusinessKey(businessKey);
+    const beforeFields: Record<string, FieldValue> = { ...(current?.fields || {}) };
+    const merged = merge(beforeFields);
+    if (current && JSON.stringify(merged) === JSON.stringify(current.fields || {})) {
+      return { action: "unchanged", record: current, beforeFields };
+    }
+    const record: LedgerRecord = {
+      record_id: current?.record_id || await this.nextImportRecordId(),
+      fields: merged
+    };
+    await this.writeRecord(record, businessKey, meta);
+    return { action: current ? "updated" : "inserted", record, beforeFields };
+  }
+
+  /** Monotonic counter bumped on every ledger write; the browser polls it to decide whether to reload. */
+  async readDataVersion(): Promise<number> {
+    if (this.mongoReady && this.db) {
+      const doc = await this.appState().findOne({ key: "version" }, { projection: { _id: 0, version: 1 } });
+      return Number(doc?.version || 0);
+    }
+    return this.seedFileDataVersion();
+  }
+
+  // The JSON fallback is single-process local dev. File mtime only has millisecond resolution, so
+  // two writes in the same millisecond would look identical to a poller — count writes in memory
+  // instead, seeded from mtime so a restart still reads as a change.
+  private seedFileDataVersion(): number {
+    if (!this.fileDataVersion) {
+      this.fileDataVersion = existsSync(dataPath) ? Math.round(statSync(dataPath).mtimeMs) : 1;
+    }
+    return this.fileDataVersion;
+  }
+
+  private async findRecordByBusinessKey(businessKey: string): Promise<LedgerRecord | null> {
+    if (this.mongoReady && this.db) {
+      const hit = await this.ledgerRecords().findOne({ business_key: businessKey });
+      if (hit) return { record_id: hit.record_id, fields: hit.fields || {} };
+      // Records written before business_key existed are backfilled by the next full saveDataset;
+      // until then recompute their key so an event cannot silently insert a duplicate.
+      const legacy = await this.ledgerRecords().find({ business_key: { $exists: false } }).toArray();
+      const match = legacy.find((doc) => importBusinessKey(doc.fields || {}) === businessKey);
+      return match ? { record_id: match.record_id, fields: match.fields || {} } : null;
+    }
+    const dataset = await this.readDataset();
+    return (dataset.records || []).find((record) => importBusinessKey(record.fields || {}) === businessKey) || null;
+  }
+
+  private async writeRecord(record: LedgerRecord, businessKey: string, meta: Partial<Dataset["meta"]>): Promise<void> {
+    if (this.mongoReady && this.db) {
+      const existing = await this.ledgerRecords().findOne({ record_id: record.record_id }, { projection: { sort_order: 1 } });
+      await this.ledgerRecords().updateOne(
+        { record_id: record.record_id },
+        {
+          $set: {
+            record_id: record.record_id,
+            fields: record.fields || {},
+            business_key: businessKey,
+            sort_order: existing ? existing.sort_order : await this.nextSortOrder(),
+            updated_at: new Date()
+          }
+        },
+        { upsert: true }
+      );
+      await this.ensureDatasetFields(Object.keys(record.fields || {}));
+      await this.updateDatasetMeta(meta);
+      await this.bumpDataVersion();
+      return;
+    }
+    const dataset = await this.readDataset();
+    const index = (dataset.records || []).findIndex((item) => item.record_id === record.record_id);
+    if (index >= 0) dataset.records[index] = record;
+    else dataset.records = [...(dataset.records || []), record];
+    ensureFields(dataset, Object.keys(record.fields || {}));
+    dataset.meta = { ...(dataset.meta || {}), ...meta };
+    await this.saveDataset(dataset);
+  }
+
+  private async nextImportRecordId(): Promise<string> {
+    if (this.mongoReady && this.db) {
+      // Numbering has to match the full-sync path, and "import-9" sorts above "import-10"
+      // lexically, so collect the ids and let nextRecordId take the numeric max.
+      const docs = await this.ledgerRecords().find({ record_id: /^import-\d+$/ }, { projection: { record_id: 1 } }).toArray();
+      return nextRecordId(docs.map((doc) => ({ record_id: doc.record_id, fields: {} })));
+    }
+    const dataset = await this.readDataset();
+    return nextRecordId(dataset.records || []);
+  }
+
+  private async nextSortOrder(): Promise<number> {
+    const last = await this.ledgerRecords()
+      .find({}, { projection: { sort_order: 1 } })
+      .sort({ sort_order: -1 })
+      .limit(1)
+      .next();
+    return (Number(last?.sort_order) || 0) + 1;
+  }
+
+  private async ensureDatasetFields(names: string[]): Promise<void> {
+    const doc = await this.appState().findOne({ key: "fields" });
+    const current = (doc?.value || []) as Dataset["fields"];
+    const known = new Set(current.map((field) => field.name || field.id));
+    const added = names.filter((name) => name && !known.has(name));
+    if (!added.length) return;
+    await this.appState().updateOne(
+      { key: "fields" },
+      { $set: { key: "fields", value: [...current, ...added.map((name) => ({ id: name, name, type: "text" }))] } },
+      { upsert: true }
+    );
+  }
+
+  private async updateDatasetMeta(patch: Partial<Dataset["meta"]>): Promise<void> {
+    const entries = Object.entries(patch || {}).filter(([, value]) => value !== undefined);
+    if (!entries.length) return;
+    await this.appState().updateOne(
+      { key: "meta" },
+      { $set: Object.fromEntries([["key", "meta"], ...entries.map(([field, value]) => [`value.${field}`, value])]) },
+      { upsert: true }
+    );
+  }
+
+  private async bumpDataVersion(): Promise<void> {
+    if (this.mongoReady && this.db) {
+      await this.appState().updateOne({ key: "version" }, { $inc: { version: 1 } }, { upsert: true });
+      return;
+    }
+    this.fileDataVersion = this.seedFileDataVersion() + 1;
   }
 
   async readLogs(recordId: string): Promise<LedgerLog[]> {
@@ -364,6 +514,7 @@ export class LedgerStoreService implements OnModuleInit {
     await Promise.all([
       this.appState().createIndex({ key: 1 }, { unique: true }),
       this.ledgerRecords().createIndex({ record_id: 1 }, { unique: true }),
+      this.ledgerRecords().createIndex({ business_key: 1 }),
       this.ledgerRecords().createIndex({ sort_order: 1 }),
       this.ledgerRecords().createIndex({ fields: "text" }),
       this.ledgerLogs().createIndex({ id: 1 }, { unique: true }),

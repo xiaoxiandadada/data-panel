@@ -68,6 +68,13 @@ export class LedgerController {
     return publicDataset(dataset, user ? requesterRecords(dataset, user.name) : []);
   }
 
+  // Cheap change detector for the browser: one counter instead of re-downloading the dataset.
+  // Deliberately unauthenticated — it exposes a write counter and nothing about the records.
+  @Get("api/data/version")
+  async dataVersion() {
+    return { ok: true, version: await this.store.readDataVersion() };
+  }
+
   @Get("api/search")
   async search(@Req() request: Request, @Query("q") q = "", @Query("limit") limit = "100") {
     const user = this.requireUser(request);
@@ -470,7 +477,8 @@ export class LedgerController {
       throw new HttpException({ ok: false, message: "飞书实时同步签名无效" }, HttpStatus.UNAUTHORIZED);
     }
     const tableId = String(payload?.tableId || payload?.table_id || "").trim();
-    const source = this.larkSync.scheduleTableSync(tableId);
+    const recordId = String(payload?.recordId || payload?.record_id || "").trim();
+    const source = this.larkSync.scheduleTableSync(tableId, recordId);
     if (!source) {
       throw new HttpException({ ok: false, message: "未识别的数据表" }, HttpStatus.BAD_REQUEST);
     }
@@ -479,7 +487,8 @@ export class LedgerController {
       accepted: true,
       source: source.source,
       tableId: source.tableId,
-      recordId: String(payload?.recordId || payload?.record_id || "").trim()
+      recordId,
+      mode: recordId ? "record" : "table"
     };
   }
 
