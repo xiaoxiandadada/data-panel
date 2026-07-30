@@ -1,12 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { mergeImportedDataset, importBusinessKey } from "../dist/server/ledger/parse-utils.js";
 import { analyzeDeliveryEfficiency } from "../dist/server/metrics/delivery-efficiency.service.js";
 import { isCompletedStatus } from "../dist/server/metrics/satisfaction.service.js";
 import { demandToLedgerFields, requesterRecords } from "../dist/server/core/ledger-utils.js";
 import { projectDatasetForAdmin } from "../dist/server/core/admin-views.js";
-import { hasAdminRole, normalizeUserRoles, primaryUserRole } from "../dist/server/core/user-roles.js";
+import { hasAdminRole, mergeAdministrativeRoles, normalizeUserRoles, primaryUserRole } from "../dist/server/core/user-roles.js";
 import { LarkOAuthService } from "../dist/server/auth/lark-oauth.service.js";
 import { LarkBaseSyncService } from "../dist/server/sync/lark-base-sync.service.js";
 import { LedgerController } from "../dist/server/ledger/ledger.controller.js";
@@ -220,7 +222,7 @@ test("super administrator appointment updates roles and writes an audit log", as
   const logs = [];
   const controller = new LedgerController(
     {
-      findUserByOpenId: async () => target,
+      findUserByOpenId: async (openId) => openId === superAdmin.openId ? superAdmin : target,
       updateUserRoles: async (_openId, roles) => {
         storedRoles = roles;
         return { ...target, role: "delivery_admin", roles };
@@ -288,7 +290,7 @@ test("three Feishu business tables expose stable online links", () => {
   }
 });
 
-test("administrator add action redirects to the primary Feishu ledger", () => {
+test("administrator add action redirects to the primary Feishu ledger", async () => {
   const admin = {
     openId: "ou_admin",
     name: "管理员",
@@ -317,7 +319,7 @@ test("administrator add action redirects to the primary Feishu ledger", () => {
     {}
   );
 
-  controller.openLarkSource(
+  await controller.openLarkSource(
     { headers: { cookie: "delivery_session=test" } },
     undefined,
     "ledger",
@@ -415,7 +417,7 @@ test("one inaccessible Feishu table does not block the other data sources", asyn
   }
 });
 
-test("Feishu sync emits one application-bot event for a real status change", async () => {
+test("Feishu sync establishes a quiet baseline before emitting status-change events", async () => {
   const keys = [
     "LARK_BASE_TOKEN",
     "LARK_LEDGER_TABLE_ID",
@@ -432,6 +434,7 @@ test("Feishu sync emits one application-bot event for a real status change", asy
   let stored = dataset([
     { "任务代码": "PJ-001", "项目名称": "Alpha", "获取状态": "需求澄清中" }
   ]);
+  let upstreamStatus = "已完结";
   const events = [];
   const service = new LarkBaseSyncService(
     {
@@ -442,18 +445,23 @@ test("Feishu sync emits one application-bot event for a real status change", asy
     {
       isBotConfigured: () => true,
       listBaseDataset: async () => dataset([
-        { "任务代码": "PJ-001", "项目名称": "Alpha", "获取状态": "已完结" }
+        { "任务代码": "PJ-001", "项目名称": "Alpha", "获取状态": upstreamStatus }
       ])
     },
     { enqueue: async (eventName, payload) => { events.push({ eventName, payload }); } }
   );
   try {
-    await service.syncAll("飞书实时推送");
+    await service.syncAll("系统启动同步");
+    assert.equal(events.filter((event) => event.eventName === "record.updated").length, 0);
+    assert.equal(service.status().notificationBaselineReady, true);
+
+    upstreamStatus = "验收中";
+    await service.syncAll("系统兜底同步");
     const statusEvents = events.filter((event) => event.eventName === "record.updated");
     assert.equal(statusEvents.length, 1);
     assert.deepEqual(statusEvents[0].payload.fields, ["获取状态"]);
-    assert.equal(statusEvents[0].payload.beforeStatus, "需求澄清中");
-    assert.equal(statusEvents[0].payload.afterStatus, "已完结");
+    assert.equal(statusEvents[0].payload.beforeStatus, "已完结");
+    assert.equal(statusEvents[0].payload.afterStatus, "验收中");
     assert.equal(statusEvents[0].payload.source, "总台账");
   } finally {
     for (const key of keys) {
@@ -461,6 +469,156 @@ test("Feishu sync emits one application-bot event for a real status change", asy
       else process.env[key] = previous[key];
     }
   }
+});
+
+test("a table whose permission arrives late does not replay its history as status changes", async () => {
+  const keys = [
+    "LARK_BASE_TOKEN",
+    "LARK_LEDGER_TABLE_ID",
+    "LARK_245_TABLE_ID",
+    "LARK_GAOFENG_TABLE_ID"
+  ];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  Object.assign(process.env, {
+    LARK_BASE_TOKEN: "base-token",
+    LARK_LEDGER_TABLE_ID: "ledger-table",
+    LARK_245_TABLE_ID: "245-table",
+    LARK_GAOFENG_TABLE_ID: "gaofeng-table"
+  });
+  let stored = dataset([
+    { "任务代码": "PJ-001", "项目名称": "Alpha", "获取状态": "需求澄清中" },
+    { "任务代码": "GF-001", "项目名称": "高峰一号", "获取状态": "采购调研中" }
+  ]);
+  let gaofengReadable = false;
+  let gaofengStatus = "已完结";
+  const events = [];
+  const service = new LarkBaseSyncService(
+    {
+      readDataset: async () => stored,
+      saveDataset: async (next) => { stored = next; },
+      appendImportBatch: async () => {}
+    },
+    {
+      isBotConfigured: () => true,
+      listBaseDataset: async (_appToken, tableId) => {
+        if (tableId === "gaofeng-table") {
+          if (!gaofengReadable) throw new Error("1254302 RolePermNotAllow");
+          return dataset([{ "任务代码": "GF-001", "项目名称": "高峰一号", "获取状态": gaofengStatus }]);
+        }
+        return dataset([{ "任务代码": "PJ-001", "项目名称": "Alpha", "获取状态": "需求澄清中" }]);
+      }
+    },
+    { enqueue: async (eventName, payload) => { events.push({ eventName, payload }); } }
+  );
+  try {
+    // 高峰加入 is not authorized yet, so only the other two tables establish a baseline.
+    await service.syncAll("系统启动同步");
+    const baselineAfterStart = service.status();
+    assert.equal(baselineAfterStart.notificationBaselineReady, false);
+    assert.equal(baselineAfterStart.sources.find((item) => item.source === "高峰加入").notificationBaseline, false);
+    assert.equal(baselineAfterStart.sources.find((item) => item.source === "总台账").notificationBaseline, true);
+
+    // Permission granted. Its first successful read differs from the stored ledger, but that is a
+    // baseline rather than a change — announcing it would notify everyone about historical rows.
+    gaofengReadable = true;
+    await service.syncAll("系统兜底同步");
+    assert.equal(events.filter((event) => event.eventName === "record.updated").length, 0);
+    assert.equal(service.status().notificationBaselineReady, true);
+
+    // Once the baseline exists a genuine change is reported normally.
+    gaofengStatus = "验收中";
+    await service.syncAll("系统兜底同步");
+    const statusEvents = events.filter((event) => event.eventName === "record.updated");
+    assert.equal(statusEvents.length, 1);
+    assert.equal(statusEvents[0].payload.source, "高峰加入");
+    assert.equal(statusEvents[0].payload.beforeStatus, "已完结");
+    assert.equal(statusEvents[0].payload.afterStatus, "验收中");
+  } finally {
+    for (const key of keys) {
+      if (previous[key] == null) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+});
+
+test("deployment configuration appoints super administrators but never restores a removed delivery admin", () => {
+  // A first login bootstraps whatever the deployment configuration says.
+  assert.deepEqual(mergeAdministrativeRoles([], ["delivery_admin"], false), ["delivery_admin"]);
+
+  // The super administrator removed the role; the name whitelist must not hand it back at login.
+  assert.deepEqual(mergeAdministrativeRoles(["member"], ["delivery_admin"], true), ["member"]);
+
+  // Appointing a new super administrator still works for a user who has logged in before — the
+  // appointment endpoint refuses to create one, so this is the only path that exists.
+  assert.deepEqual(mergeAdministrativeRoles(["member"], ["super_admin"], true), ["super_admin"]);
+
+  // An administrator appointed in the page keeps the role even though no environment lists them.
+  assert.deepEqual(mergeAdministrativeRoles(["delivery_admin"], [], true), ["delivery_admin"]);
+
+  // requester is tracked by requesterRegistered and never travels through this merge.
+  assert.deepEqual(mergeAdministrativeRoles(["requester"], ["requester"], true), ["member"]);
+});
+
+test("the sync setup script refuses a callback address Feishu cannot reach", () => {
+  const script = fileURLToPath(new URL("../scripts/setup-lark-sync-workflows.mjs", import.meta.url));
+  const rejected = [
+    { url: "http://127.0.0.1:5173", reason: "必须使用 https" },
+    { url: "https://localhost:5173", reason: "本地或内网地址" },
+    { url: "https://192.168.1.20", reason: "本地或内网地址" },
+    { url: "https://10.0.0.5", reason: "本地或内网地址" },
+    { url: "https://panel.internal", reason: "本地或内网地址" }
+  ];
+  for (const item of rejected) {
+    const result = spawnSync(process.execPath, [script], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PUBLIC_APP_URL: item.url,
+        LARK_BASE_WEBHOOK_URL: "",
+        LARK_BASE_WEBHOOK_SECRET: "s".repeat(48)
+      }
+    });
+    assert.notEqual(result.status, 0, `${item.url} 应该被拒绝`);
+    assert.match(result.stderr, new RegExp(item.reason), `${item.url} 的报错应说明原因`);
+  }
+});
+
+test("revoked administrator loses protected access without waiting for session expiry", async () => {
+  const staleAdmin = {
+    openId: "ou_revoked",
+    name: "原管理员",
+    role: "delivery_admin",
+    roles: ["delivery_admin"]
+  };
+  const storedRequester = {
+    ...staleAdmin,
+    role: "requester",
+    roles: ["requester"],
+    requesterRegistered: true
+  };
+  const controller = new LedgerController(
+    {
+      findUserByOpenId: async () => storedRequester
+    },
+    {
+      sessionCookieName: "delivery_session",
+      verifyToken: () => staleAdmin,
+      isAdminUser: (user) => user?.roles?.includes("delivery_admin")
+    },
+    {},
+    {},
+    {},
+    {},
+    {}
+  );
+
+  await assert.rejects(
+    () => controller.fieldPreferences(
+      { headers: { cookie: "delivery_session=stale" } },
+      undefined
+    ),
+    (error) => error?.response?.message === "需要管理员权限"
+  );
 });
 
 test("status bot notifies requesters and assigned administrators only", async () => {

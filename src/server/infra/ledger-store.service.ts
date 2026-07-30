@@ -6,7 +6,7 @@ import { MongoClient, type Collection, type Db, type Document } from "mongodb";
 import type { AppUser, Dataset, ImportBatch, LedgerLog, LedgerRecord, NotificationLog, UserFieldPreferences, UserRole } from "../core/types.js";
 import type { FieldValue } from "../core/types.js";
 import { ensureFields, importBusinessKey, nextRecordId, rowsToDataset, stringifyCell } from "../core/ledger-utils.js";
-import { normalizeUserRoles, primaryUserRole } from "../core/user-roles.js";
+import { mergeAdministrativeRoles, normalizeUserRoles, primaryUserRole } from "../core/user-roles.js";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const dataDir = resolve(process.env.DATA_DIR || resolve(root, "data"));
@@ -358,13 +358,13 @@ export class LedgerStoreService implements OnModuleInit {
       const now = new Date();
       const existing = await this.appUsers().findOne({ openId: user.openId });
       const requesterRegistered = Boolean(existing?.requesterRegistered || user.requesterRegistered);
-      const priorRoles = ((existing?.roles as UserRole[] | undefined) || [])
-        .filter((role) => role !== "requester" && role !== "member");
-      const incomingRoles = [...(user.roles || []), user.role]
-        .filter((role) => role !== "requester" && role !== "member");
+      const administrativeRoles = mergeAdministrativeRoles(
+        (existing?.roles as UserRole[] | undefined) || [],
+        [...(user.roles || []), user.role],
+        Boolean(existing)
+      );
       const roles = normalizeUserRoles([
-        ...priorRoles,
-        ...incomingRoles,
+        ...administrativeRoles,
         ...(requesterRegistered ? ["requester" as UserRole] : [])
       ]);
       const role = primaryUserRole(roles);

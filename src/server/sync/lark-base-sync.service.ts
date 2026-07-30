@@ -49,6 +49,11 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
   private resolvedAppToken = "";
   private lastSyncedAt = "";
   private lastError = "";
+  // Notification baseline, tracked per table: the first successful full read only establishes what
+  // that table currently looks like. It has to be per table, not global — a table whose permission
+  // is granted later than its siblings would otherwise inherit their baseline and replay its entire
+  // history as status changes on its first successful sync.
+  private readonly notificationBaselines = new Set<LarkSyncSource["key"]>();
 
   constructor(
     private readonly store: LedgerStoreService,
@@ -80,22 +85,28 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
   }
 
   status() {
+    const configuredSources = this.sourceConfigurations().filter((source) => source.configured);
     return {
       configured: this.isConfigured(),
       syncing: this.syncing,
       eventPushConfigured: Boolean(String(process.env.LARK_BASE_WEBHOOK_SECRET || "").trim()),
       pendingEventCount: this.pendingEventSources.size,
       pendingRecordCount: [...this.pendingEventSources.values()].reduce((sum, event) => sum + event.recordIds.size, 0),
+      // True only once every configured table has been read successfully at least once, so a table
+      // still waiting on its permissions keeps this false and stays visible as unfinished setup.
+      notificationBaselineReady: configuredSources.length > 0
+        && configuredSources.every((source) => this.notificationBaselines.has(source.key)),
       lastSyncedAt: this.lastSyncedAt,
       lastError: this.lastError,
-      sources: this.sourceConfigurations().map((source) => (
-        this.sourceStatuses.get(source.key) || {
+      sources: this.sourceConfigurations().map((source) => ({
+        ...(this.sourceStatuses.get(source.key) || {
           source: source.source,
           tableId: source.tableId,
           lastSyncedAt: "",
           lastError: ""
-        }
-      ))
+        }),
+        notificationBaseline: this.notificationBaselines.has(source.key)
+      }))
     };
   }
 
@@ -211,7 +222,7 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
       const results: LarkSyncResult[] = [];
       const errors: string[] = [];
       const initialDataset = await this.store.readDataset();
-      const notifyStatusChanges = initialDataset.records.length > 0;
+      const ledgerSeeded = initialDataset.records.length > 0;
       for (const source of sources) {
         try {
           const incoming = await this.lark.listBaseDataset(appToken, source.tableId, source.viewId);
@@ -228,7 +239,10 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
           };
           await this.store.saveDataset(merged.dataset);
           await this.store.appendImportBatch(batch);
-          if (notifyStatusChanges) {
+          // Only a table that already has a baseline can produce a meaningful diff. Reading a table
+          // for the first time — a fresh deploy, or one table's permission arriving later than the
+          // others — would otherwise report every historical status as a change.
+          if (ledgerSeeded && this.notificationBaselines.has(source.key)) {
             await this.enqueueStatusChanges(existing.records, merged.dataset.records, incoming.records, source.source);
           }
           await this.queue.enqueue("dataset.synced", { source: source.source, count: incoming.records.length });
@@ -239,6 +253,7 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
             lastSyncedAt: syncedAt,
             lastError: ""
           });
+          this.notificationBaselines.add(source.key);
           results.push({ source: source.source, tableId: source.tableId, batch });
         } catch (error) {
           const message = error instanceof Error ? error.message : "飞书 Base 同步失败";
@@ -323,6 +338,9 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
         );
         summary[result.action] += 1;
         // New records carry no prior status, matching the full-sync rule of only notifying on change.
+        // Deliberately not gated on the notification baseline: an event means someone just edited
+        // this one record, and one record cannot flood anybody — the baseline only exists to stop a
+        // first full read from replaying a whole table's history.
         if (result.action === "updated") {
           await this.enqueueRecordStatusChange(result.beforeFields, result.record, source.source);
         }

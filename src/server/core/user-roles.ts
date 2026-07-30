@@ -26,3 +26,28 @@ export function normalizeUserRoles(roles: UserRole[]): UserRole[] {
 export function primaryUserRole(roles: UserRole[]): UserRole {
   return normalizeUserRoles(roles)[0] || "member";
 }
+
+/**
+ * Decides which administrative roles a login writes back, reconciling deployment configuration
+ * against what the super administrator has since changed in MongoDB.
+ *
+ * `delivery_admin` from the environment (open_id, email or the name whitelist) only bootstraps a
+ * user the first time they log in; afterwards MongoDB wins, so a role the super administrator
+ * removed is not silently restored on the next login. `super_admin` is the exception: the
+ * appointment endpoint refuses to create one, which makes deployment configuration the only path
+ * that exists — ignoring it for an existing user would make appointing a new super administrator
+ * impossible for anyone who has ever logged in.
+ */
+export function mergeAdministrativeRoles(
+  storedRoles: UserRole[],
+  configuredRoles: UserRole[],
+  userExists: boolean
+): UserRole[] {
+  const administrative = (roles: UserRole[]) => roles.filter((role) => adminRoles.has(role));
+  const configured = administrative(configuredRoles);
+  if (!userExists) return normalizeUserRoles(configured);
+  return normalizeUserRoles([
+    ...administrative(storedRoles),
+    ...configured.filter((role) => role === "super_admin")
+  ]);
+}

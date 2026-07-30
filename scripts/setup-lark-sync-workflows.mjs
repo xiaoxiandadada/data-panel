@@ -10,6 +10,37 @@ const webhookSecret = String(process.env.LARK_BASE_WEBHOOK_SECRET || "").trim();
 
 if (!webhookUrl) throw new Error("请设置 PUBLIC_APP_URL 或 LARK_BASE_WEBHOOK_URL");
 if (webhookSecret.length < 32) throw new Error("LARK_BASE_WEBHOOK_SECRET 至少需要 32 个字符");
+assertReachableWebhookUrl(webhookUrl);
+
+// The Workflows are created inside a Base the whole team shares, and Feishu calls the URL from its
+// own servers. A local or private address would leave three permanently broken callbacks behind that
+// someone else has to find and clean up, so refuse before anything is written.
+function assertReachableWebhookUrl(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`回调地址不是合法 URL：${value}`);
+  }
+  const hint = "请把 PUBLIC_APP_URL 设为部署域名（如 https://data-panel-dev.shlab.tech）后重新执行。";
+  if (url.protocol !== "https:") {
+    throw new Error(`回调地址必须使用 https，当前为 ${url.protocol}//${url.host}。${hint}`);
+  }
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const unreachable = host === "localhost"
+    || host === "::1"
+    || host.endsWith(".local")
+    || host.endsWith(".internal")
+    || host.endsWith(".localhost")
+    || /^127\./.test(host)
+    || /^10\./.test(host)
+    || /^192\.168\./.test(host)
+    || /^169\.254\./.test(host)
+    || /^172\.(1[6-9]|2\d|3[01])\./.test(host);
+  if (unreachable) {
+    throw new Error(`回调地址 ${url.host} 是本地或内网地址，飞书服务器访问不到。${hint}`);
+  }
+}
 
 const sources = [
   {

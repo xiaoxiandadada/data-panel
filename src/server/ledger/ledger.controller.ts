@@ -61,9 +61,9 @@ export class LedgerController {
   @Get("api/data")
   async data(@Req() request: Request, @Headers("x-admin-token") token?: string, @Query("mode") mode = "") {
     const dataset = await this.store.readDataset();
-    const user = this.currentUser(request);
+    const user = await this.currentUser(request);
     if (mode === "mine") return publicDataset(dataset, user ? requesterRecords(dataset, user.name) : []);
-    const admin = this.adminUser(request, token);
+    const admin = await this.adminUser(request, token);
     if (admin) return projectDatasetForAdmin(dataset, admin);
     return publicDataset(dataset, user ? requesterRecords(dataset, user.name) : []);
   }
@@ -77,7 +77,7 @@ export class LedgerController {
 
   @Get("api/search")
   async search(@Req() request: Request, @Query("q") q = "", @Query("limit") limit = "100") {
-    const user = this.requireUser(request);
+    const user = await this.requireUser(request);
     const dataset = await this.store.readDataset();
     const safeLimit = Math.min(Math.max(Number(limit || 100), 1), 200);
     const allowed = this.auth.isAdminUser(user) ? dataset.records : requesterRecords(dataset, user.name);
@@ -87,14 +87,14 @@ export class LedgerController {
 
   @Get("api/requesters")
   async requesters(@Req() request: Request, @Headers("x-admin-token") token?: string) {
-    this.requireAdmin(request, token);
+    await this.requireAdmin(request, token);
     const dataset = await this.store.readDataset();
     return { ok: true, requesters: uniqueRequesterNames(dataset) };
   }
 
   @Get("api/analytics/delivery-efficiency")
   async deliveryEfficiency(@Req() request: Request, @Headers("x-admin-token") token?: string) {
-    this.requireAdmin(request, token);
+    await this.requireAdmin(request, token);
     return {
       ok: true,
       generatedAt: new Date().toISOString(),
@@ -104,7 +104,7 @@ export class LedgerController {
 
   @Get("api/lark/users/search")
   async searchLarkUsers(@Req() request: Request, @Query("q") q = "", @Query("limit") limit = "10") {
-    if (!this.currentUser(request)) {
+    if (!await this.currentUser(request)) {
       throw new HttpException({ ok: false, message: "请先通过飞书登录" }, HttpStatus.UNAUTHORIZED);
     }
     if (!this.larkOAuth.isConfigured()) {
@@ -124,14 +124,14 @@ export class LedgerController {
   @Get("api/my-records")
   async myRecords(@Req() request: Request) {
     const dataset = await this.store.readDataset();
-    const user = this.requireRequester(request);
+    const user = await this.requireRequester(request);
     return publicDataset(dataset, requesterRecords(dataset, user.name));
   }
 
   @Get("api/my-records/export")
   async exportMyRecords(@Req() request: Request, @Res() response: Response) {
     const dataset = await this.store.readDataset();
-    const user = this.requireRequester(request);
+    const user = await this.requireRequester(request);
     const records = requesterRecords(dataset, user.name);
     const exported = publicDataset(dataset, records);
     response.setHeader("Content-Type", "text/csv; charset=utf-8");
@@ -153,8 +153,8 @@ export class LedgerController {
   }
 
   @Get("api/auth/me")
-  me(@Req() request: Request) {
-    const user = this.currentUser(request);
+  async me(@Req() request: Request) {
+    const user = await this.currentUser(request);
     return {
       ok: true,
       authenticated: Boolean(user),
@@ -245,7 +245,7 @@ export class LedgerController {
   @Post("api/requests")
   @HttpCode(200)
   async submitRequest(@Req() request: Request, @Body() payload: Record<string, unknown>) {
-    const user = this.requireRequester(request);
+    const user = await this.requireRequester(request);
     const requesterName = user.name;
     const dataset = await this.store.readDataset();
     ensureFields(dataset, ["需求负责人", "需求人", "关注人", "PM"]);
@@ -277,7 +277,7 @@ export class LedgerController {
 
   @Patch("api/requests/:id/followers")
   async updateFollowers(@Req() request: Request, @Param("id") recordId: string, @Body() payload: { followers?: string }) {
-    const user = this.requireRequester(request);
+    const user = await this.requireRequester(request);
     const requesterName = user.name;
     const dataset = await this.store.readDataset();
     ensureFields(dataset, ["需求负责人", "需求人", "关注人", "PM"]);
@@ -311,7 +311,7 @@ export class LedgerController {
     @Param("id") recordId: string,
     @Body() payload: { score?: number; comment?: string; defaulted?: boolean }
   ) {
-    const user = this.requireRequester(request);
+    const user = await this.requireRequester(request);
     const score = Math.round(Number(payload.score || 0));
     if (score < 1 || score > 5) throw new HttpException({ ok: false, message: "满意度必须为 1 到 5 分" }, HttpStatus.BAD_REQUEST);
     const comment = String(payload.comment || "").trim();
@@ -344,8 +344,8 @@ export class LedgerController {
 
   @Get("api/records/:id/logs")
   async logs(@Req() request: Request, @Headers("x-admin-token") token: string | undefined, @Param("id") recordId: string) {
-    this.requireAdmin(request, token);
-    const user = this.adminUser(request, token);
+    await this.requireAdmin(request, token);
+    const user = await this.adminUser(request, token);
     const dataset = await this.store.readDataset();
     if (!dataset.records.some((record) => record.record_id === recordId)) {
       throw new HttpException({ ok: false, message: "记录不存在" }, HttpStatus.NOT_FOUND);
@@ -363,7 +363,7 @@ export class LedgerController {
     @Query("source") sourceQuery: string | undefined,
     @Body() parsedBody: unknown
   ) {
-    this.requireSuperAdmin(request, token);
+    await this.requireSuperAdmin(request, token);
     const contentType = request.headers["content-type"] || "";
     const fileName = decodeURIComponent(String(fileNameHeader || "").trim() || "数据导入");
     const source = this.importSource(sourceQuery);
@@ -388,7 +388,7 @@ export class LedgerController {
         preview: incoming.records.slice(0, 20)
       };
     }
-    const user = this.currentUser(request);
+    const user = await this.currentUser(request);
     const batch: ImportBatch = {
       id: randomUUID(),
       source,
@@ -407,21 +407,21 @@ export class LedgerController {
 
   @Get("api/import/history")
   async importHistory(@Req() request: Request, @Headers("x-admin-token") token?: string) {
-    this.requireSuperAdmin(request, token);
+    await this.requireSuperAdmin(request, token);
     return { ok: true, batches: await this.store.readImportBatches() };
   }
 
   @Post("api/sync/lark")
   @HttpCode(200)
   async syncLark(@Req() request: Request, @Headers("x-admin-token") token?: string) {
-    this.requireSuperAdmin(request, token);
-    const user = this.currentUser(request);
+    await this.requireSuperAdmin(request, token);
+    const user = await this.currentUser(request);
     return { ok: true, results: await this.larkSync.syncAll(user?.name || "超级管理员") };
   }
 
   @Get("api/sync/lark/sources")
   async larkSyncSources(@Req() request: Request, @Headers("x-admin-token") token?: string) {
-    this.requireAdminUser(request, token);
+    await this.requireAdminUser(request, token);
     const batches = (await this.store.readImportBatches(100)).filter((batch) => batch.mode === "lark");
     const status = this.larkSync.status();
     return {
@@ -437,13 +437,13 @@ export class LedgerController {
   }
 
   @Get("api/sync/lark/sources/:key/open")
-  openLarkSource(
+  async openLarkSource(
     @Req() request: Request,
     @Headers("x-admin-token") token: string | undefined,
     @Param("key") key: string,
     @Res() response: Response
   ) {
-    this.requireAdminUser(request, token);
+    await this.requireAdminUser(request, token);
     const source = this.larkSync.sourceConfigurations().find((item) => item.key === key);
     if (!source?.url) {
       throw new HttpException({ ok: false, message: "飞书数据源链接尚未配置" }, HttpStatus.NOT_FOUND);
@@ -494,7 +494,7 @@ export class LedgerController {
 
   @Get("api/preferences/fields")
   async fieldPreferences(@Req() request: Request, @Headers("x-admin-token") token?: string) {
-    const user = this.requireAdminUser(request, token);
+    const user = await this.requireAdminUser(request, token);
     const dataset = projectDatasetForAdmin(await this.store.readDataset(), user);
     return {
       ok: true,
@@ -509,7 +509,7 @@ export class LedgerController {
     @Headers("x-admin-token") token: string | undefined,
     @Body() payload: { hiddenFields?: string[]; fieldOrder?: string[]; pinnedFields?: string[] }
   ) {
-    const user = this.requireAdminUser(request, token);
+    const user = await this.requireAdminUser(request, token);
     const dataset = projectDatasetForAdmin(await this.store.readDataset(), user);
     const allowed = new Set(dataset.fields.map((field) => field.name || field.id));
     const hiddenFields = (payload.hiddenFields || []).map(String).filter((field) => allowed.has(field));
@@ -526,7 +526,7 @@ export class LedgerController {
 
   @Get("api/admin/users")
   async adminUsers(@Req() request: Request, @Headers("x-admin-token") token?: string) {
-    this.requireSuperAdmin(request, token);
+    await this.requireSuperAdmin(request, token);
     return { ok: true, users: (await this.store.listUsers()).filter((user) => this.auth.isAdminUser(user)) };
   }
 
@@ -542,8 +542,8 @@ export class LedgerController {
       user?: Pick<AppUser, "openId" | "name" | "email" | "department" | "avatar">
     }
   ) {
-    this.requireSuperAdmin(request, token);
-    const actor = this.adminUser(request, token);
+    await this.requireSuperAdmin(request, token);
+    const actor = await this.adminUser(request, token);
     const allowed: UserRole[] = ["member", "requester", "delivery_admin", "super_admin"];
     const roles = Array.isArray(payload.roles) ? payload.roles : payload.role ? [payload.role] : [];
     if (!roles.length || roles.some((role) => !allowed.includes(role))) {
@@ -590,8 +590,8 @@ export class LedgerController {
   @Post("api/records")
   @HttpCode(200)
   async createRecord(@Req() request: Request, @Headers("x-admin-token") token: string | undefined, @Body() payload: { fields?: Record<string, FieldValue>; actor?: string }) {
-    this.requireSuperAdmin(request, token);
-    const user = this.currentUser(request);
+    await this.requireSuperAdmin(request, token);
+    const user = await this.currentUser(request);
     const dataset = await this.store.readDataset();
     const record: LedgerRecord = {
       record_id: nextRecordId(dataset.records || []),
@@ -621,9 +621,9 @@ export class LedgerController {
 
   @Patch("api/records/:id")
   async updateRecord(@Req() request: Request, @Headers("x-admin-token") token: string | undefined, @Param("id") recordId: string, @Body() payload: { fields?: Record<string, FieldValue>; actor?: string }) {
-    this.requireAdmin(request, token);
-    const admin = this.adminUser(request, token);
-    const user = this.currentUser(request);
+    await this.requireAdmin(request, token);
+    const admin = await this.adminUser(request, token);
+    const user = await this.currentUser(request);
     const currentDataset = await this.store.readDataset();
     const currentRecord = currentDataset.records.find((item) => item.record_id === recordId);
     if (!currentRecord) throw new HttpException({ ok: false, message: "记录不存在" }, HttpStatus.NOT_FOUND);
@@ -654,51 +654,62 @@ export class LedgerController {
     };
   }
 
-  private requireAdmin(request: Request, token: string | undefined) {
-    if (!this.isAdminRequest(request, token)) {
+  private async requireAdmin(request: Request, token: string | undefined) {
+    if (!await this.isAdminRequest(request, token)) {
       throw new HttpException({ ok: false, message: "需要管理员权限" }, HttpStatus.FORBIDDEN);
     }
   }
 
-  private requireAdminUser(request: Request, token: string | undefined): AppUser {
-    const user = this.adminUser(request, token);
+  private async requireAdminUser(request: Request, token: string | undefined): Promise<AppUser> {
+    const user = await this.adminUser(request, token);
     if (!user) throw new HttpException({ ok: false, message: "需要管理员权限" }, HttpStatus.FORBIDDEN);
     return user;
   }
 
-  private requireUser(request: Request): AppUser {
-    const user = this.currentUser(request);
+  private async requireUser(request: Request): Promise<AppUser> {
+    const user = await this.currentUser(request);
     if (!user) throw new HttpException({ ok: false, message: "请先使用飞书登录" }, HttpStatus.UNAUTHORIZED);
     return user;
   }
 
-  private requireRequester(request: Request): AppUser {
-    const user = this.requireUser(request);
+  private async requireRequester(request: Request): Promise<AppUser> {
+    const user = await this.requireUser(request);
     if (!this.auth.hasRole(user, "requester")) {
       throw new HttpException({ ok: false, message: "请先从需求方入口登录并建立需求方身份" }, HttpStatus.FORBIDDEN);
     }
     return user;
   }
 
-  private requireSuperAdmin(request: Request, token: string | undefined) {
-    if (!isSuperAdmin(this.adminUser(request, token))) {
+  private async requireSuperAdmin(request: Request, token: string | undefined) {
+    if (!isSuperAdmin(await this.adminUser(request, token))) {
       throw new HttpException({ ok: false, message: "需要超级管理员权限" }, HttpStatus.FORBIDDEN);
     }
   }
 
-  private isAdminRequest(request: Request, token: string | undefined): boolean {
-    return Boolean(this.adminUser(request, token));
+  private async isAdminRequest(request: Request, token: string | undefined): Promise<boolean> {
+    return Boolean(await this.adminUser(request, token));
   }
 
-  private adminUser(request: Request, token: string | undefined): AppUser | null {
-    const tokenUser = this.auth.verifyToken(token);
+  private async adminUser(request: Request, token: string | undefined): Promise<AppUser | null> {
+    const tokenUser = await this.refreshSessionUser(this.auth.verifyToken(token));
     if (this.auth.isAdminUser(tokenUser)) return tokenUser;
-    const sessionUser = this.currentUser(request);
+    const sessionUser = await this.currentUser(request);
     return this.auth.isAdminUser(sessionUser) ? sessionUser : null;
   }
 
-  private currentUser(request: Request): AppUser | null {
-    return this.auth.verifyToken(this.cookieValue(request, this.auth.sessionCookieName));
+  private async currentUser(request: Request): Promise<AppUser | null> {
+    return this.refreshSessionUser(
+      this.auth.verifyToken(this.cookieValue(request, this.auth.sessionCookieName))
+    );
+  }
+
+  private async refreshSessionUser(tokenUser: AppUser | null): Promise<AppUser | null> {
+    if (!tokenUser) return null;
+    try {
+      return await this.store.findUserByOpenId(tokenUser.openId) || tokenUser;
+    } catch {
+      return tokenUser;
+    }
   }
 
   private cookieValue(request: Request, name: string): string | undefined {

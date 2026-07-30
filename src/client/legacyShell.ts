@@ -34,14 +34,25 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
         <div class="actions">
           <button id="workspaceModeButton" class="button hidden" type="button">切换到我的需求</button>
           <button id="modeButton" class="button" type="button">管理员登录</button>
-          <button id="fieldSettingsButton" class="button admin-only hidden" type="button">自定义词条</button>
-          <button id="larkSourcesButton" class="button admin-only hidden" type="button">飞书数据源</button>
-          <button id="userManagementButton" class="button admin-only hidden" type="button">管理员设置</button>
-          <button id="addRecordButton" class="button admin-only hidden" type="button" title="在飞书中打开数据团队总台账">去总台账添加</button>
-          <button id="importButton" class="button primary admin-only hidden" type="button">上传 Excel</button>
-          <button id="refreshButton" class="button admin-only" type="button">刷新</button>
         </div>
       </header>
+
+      <nav id="adminCommandBar" class="admin-command-bar admin-only" aria-label="管理员工具">
+        <div class="command-bar-copy">
+          <span>管理员工作台</span>
+          <strong>统一台账与个人视图</strong>
+        </div>
+        <div class="command-group" aria-label="视图与权限">
+          <button id="fieldSettingsButton" class="button admin-only hidden" type="button">自定义词条</button>
+          <button id="larkSourcesButton" class="button admin-only hidden" type="button">同步状态</button>
+          <button id="userManagementButton" class="button admin-only hidden" type="button">管理员设置</button>
+        </div>
+        <div class="command-group command-group-primary" aria-label="数据维护">
+          <button id="addRecordButton" class="button admin-only hidden" type="button" title="在飞书中打开数据团队总台账">打开总台账</button>
+          <button id="importButton" class="button admin-only hidden" type="button">上传 Excel</button>
+          <button id="refreshButton" class="button primary admin-only" type="button">刷新数据</button>
+        </div>
+      </nav>
 
       <section id="loginGate" class="login-gate" aria-label="登录入口">
         <div class="login-data-backdrop" aria-hidden="true">
@@ -68,7 +79,7 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
             <div class="login-copy">
               <p class="eyebrow">身份入口</p>
               <h2>进入交付管线</h2>
-              <p>企业成员使用飞书登录后自动注册；管理员也可以进入自己的需求工作台。</p>
+              <p>企业成员完成身份认证后进入个人需求；已任命管理员进入交付台账。</p>
             </div>
             <div class="login-protocol" aria-label="身份验证方式">
               <i aria-hidden="true"></i>

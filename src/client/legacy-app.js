@@ -1547,7 +1547,7 @@ function updateLoginGate() {
 
   if (copy) {
     copy.textContent = oauthMode
-      ? "需求方登录后查看个人进展；仅由超级管理员任命的成员可进入管理员台账。"
+      ? "企业成员完成身份认证后进入个人需求；已任命管理员进入交付台账。"
       : "需求方登录后查看自己的需求进展并提交新需求，管理员维护交付台账。";
   }
   if (requesterLoginLabel) requesterLoginLabel.textContent = "需求方登录";

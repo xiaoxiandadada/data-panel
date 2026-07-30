@@ -32,6 +32,16 @@ export class AuthService {
   private readonly secret = process.env.AUTH_SECRET || this.adminPassword;
   private readonly sessionMaxAgeSeconds = 8 * 60 * 60;
 
+  constructor() {
+    const production = ["production", "prod"].includes(String(process.env.NODE_ENV || "").toLowerCase());
+    if (production && (this.secret.length < 32 || this.secret === "local-dev-change-before-production")) {
+      throw new Error("生产环境 AUTH_SECRET 必须设置为至少 32 字符的随机密钥");
+    }
+    if (production && (!process.env.ADMIN_PASSWORD || this.adminPassword === "admin123")) {
+      throw new Error("生产环境 ADMIN_PASSWORD 不能使用默认值");
+    }
+  }
+
   private readonly mockUsers: AppUser[] = [
     { openId: "mock_wang-guanchu", name: "王冠楚", email: "wangguanchu@example.local", department: "安全可信AGI", role: "requester", roles: ["requester"], requesterRegistered: true },
     { openId: "mock_gu-yuying", name: "顾语莺", email: "guyuying@example.local", department: "数据平台中心", role: "delivery_admin", roles: ["delivery_admin"], requesterRegistered: false },
@@ -128,11 +138,11 @@ export class AuthService {
   }
 
   cookieOptions(): string {
-    return `HttpOnly; Path=/; SameSite=Lax; Max-Age=${this.sessionMaxAgeSeconds}`;
+    return `HttpOnly; Path=/; SameSite=Lax; Max-Age=${this.sessionMaxAgeSeconds}${this.secureCookieSuffix()}`;
   }
 
   clearCookieOptions(): string {
-    return "HttpOnly; Path=/; SameSite=Lax; Max-Age=0";
+    return `HttpOnly; Path=/; SameSite=Lax; Max-Age=0${this.secureCookieSuffix()}`;
   }
 
   mockLoginUsers(): AppUser[] {
@@ -172,5 +182,10 @@ export class AuthService {
 
   private signature(payloadPart: string): string {
     return createHmac("sha256", this.secret).update(payloadPart).digest("base64url");
+  }
+
+  private secureCookieSuffix(): string {
+    const production = ["production", "prod"].includes(String(process.env.NODE_ENV || "").toLowerCase());
+    return production ? "; Secure" : "";
   }
 }
