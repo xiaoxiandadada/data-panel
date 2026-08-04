@@ -845,7 +845,7 @@ test("Feishu administrator search uses tenant contact directory APIs", async () 
   }
 });
 
-test("Feishu administrator search reports redacted contact field permissions", async () => {
+test("Feishu administrator search tolerates redacted department names", async () => {
   const server = createServer((request, response) => {
     response.setHeader("content-type", "application/json");
     if (request.url === "/open-apis/auth/v3/tenant_access_token/internal") {
@@ -858,6 +858,19 @@ test("Feishu administrator search reports redacted contact field permissions", a
         data: {
           has_more: false,
           items: [{ open_department_id: "od_delivery" }]
+        }
+      }));
+      return;
+    }
+    if (request.url?.includes("/open-apis/contact/v3/users/find_by_department")) {
+      const url = new URL(request.url, "http://127.0.0.1");
+      response.end(JSON.stringify({
+        code: 0,
+        data: {
+          has_more: false,
+          items: url.searchParams.get("department_id") === "od_delivery"
+            ? [{ open_id: "ou_delivery_admin", name: "顾语莺", department_ids: ["od_delivery"] }]
+            : []
         }
       }));
       return;
@@ -879,10 +892,59 @@ test("Feishu administrator search reports redacted contact field permissions", a
   });
   try {
     const lark = new LarkOAuthService();
-    await assert.rejects(
-      () => lark.searchUsers("顾语莺"),
-      /contact:department\.base:readonly/
-    );
+    assert.deepEqual(await lark.searchUsers("顾语莺"), [{
+      openId: "ou_delivery_admin",
+      name: "顾语莺",
+      email: undefined,
+      department: undefined,
+      avatar: undefined
+    }]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    for (const key of keys) {
+      if (previous[key] == null) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+});
+
+test("Feishu administrator search reports redacted user base fields", async () => {
+  const server = createServer((request, response) => {
+    response.setHeader("content-type", "application/json");
+    if (request.url === "/open-apis/auth/v3/tenant_access_token/internal") {
+      response.end(JSON.stringify({ code: 0, tenant_access_token: "tenant-token", expire: 3600 }));
+      return;
+    }
+    if (request.url?.startsWith("/open-apis/contact/v3/departments/0/children")) {
+      response.end(JSON.stringify({ code: 0, data: { has_more: false, items: [{ open_department_id: "od_delivery" }] } }));
+      return;
+    }
+    if (request.url?.includes("/open-apis/contact/v3/users/find_by_department")) {
+      response.end(JSON.stringify({ code: 0, data: { has_more: false, items: [{ open_id: "ou_delivery_admin" }] } }));
+      return;
+    }
+    response.statusCode = 404;
+    response.end(JSON.stringify({ code: 404, msg: "not found" }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const host = `http://127.0.0.1:${address.port}`;
+  const keys = ["LARK_APP_ID", "LARK_APP_SECRET", "LARK_REDIRECT_URI", "LARK_API_HOST"];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  Object.assign(process.env, {
+    LARK_APP_ID: "test-app",
+    LARK_APP_SECRET: "test-secret",
+    LARK_REDIRECT_URI: `${host}/callback`,
+    LARK_API_HOST: host
+  });
+  try {
+    const lark = new LarkOAuthService();
+    await assert.rejects(() => lark.searchUsers("顾语莺"), (error) => {
+      assert.equal(error.code, "LARK_CONTACT_USER_FIELDS_REDACTED");
+      assert.deepEqual(error.requiredScopes, ["contact:user.base:readonly"]);
+      return true;
+    });
   } finally {
     await new Promise((resolve) => server.close(resolve));
     for (const key of keys) {

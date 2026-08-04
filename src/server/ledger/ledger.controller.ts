@@ -2,7 +2,7 @@ import { Body, Controller, Get, Headers, HttpCode, HttpException, HttpStatus, Pa
 import type { Request, Response } from "express";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { AuthService } from "../auth/auth.service.js";
-import { LarkOAuthService } from "../auth/lark-oauth.service.js";
+import { LarkIntegrationError, LarkOAuthService } from "../auth/lark-oauth.service.js";
 import { canEditAdminFields, canReadLogField, isSuperAdmin, projectDatasetForAdmin } from "../core/admin-views.js";
 import {
   actorFromPayload,
@@ -114,9 +114,13 @@ export class LedgerController {
     try {
       return { ok: true, users: await this.larkOAuth.searchUsers(q, safeLimit) };
     } catch (error) {
+      const integration = error instanceof LarkIntegrationError ? error : null;
       throw new HttpException({
         ok: false,
-        message: error instanceof Error ? error.message : "飞书通讯录搜索失败"
+        message: error instanceof Error ? error.message : "飞书通讯录搜索失败",
+        code: integration?.code || "LARK_DIRECTORY_SEARCH_FAILED",
+        requiredScopes: integration?.requiredScopes || [],
+        action: integration?.action || "检查飞书应用通讯录权限与可用范围"
       }, HttpStatus.BAD_GATEWAY);
     }
   }

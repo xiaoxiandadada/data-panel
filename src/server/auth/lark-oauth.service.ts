@@ -54,6 +54,18 @@ export interface LarkContactUser {
   avatar?: string;
 }
 
+export class LarkIntegrationError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly requiredScopes: string[] = [],
+    readonly action = ""
+  ) {
+    super(message);
+    this.name = "LarkIntegrationError";
+  }
+}
+
 type RoleConfig = {
   role: UserRole;
   openIds: Set<string>;
@@ -287,15 +299,14 @@ export class LarkOAuthService {
     departmentUrl.searchParams.set("fetch_child", "true");
     departmentUrl.searchParams.set("page_size", "50");
     const departments = await this.pagedDirectoryItems(departmentUrl, token, "飞书部门通讯录读取失败");
-    if (departments.length && !departments.some((department) => cleanEnv(department.name))) {
-      throw new Error(
-        "飞书部门通讯录仅返回 ID，应用还需开通“获取部门基础信息”（contact:department.base:readonly）"
-      );
-    }
+    // Department names are a field-level permission in Feishu. They are useful display metadata,
+    // but are not required to find a member or appoint them by open_id. Some installations grant
+    // the application the organization tree and user base fields while intentionally redacting
+    // department names; keep traversing the returned IDs in that valid configuration.
     const departmentNames = new Map<string, string>([["0", "根部门"]]);
     departments.forEach((department) => {
       const id = cleanEnv(department.open_department_id || department.department_id);
-      if (id) departmentNames.set(id, cleanEnv(department.name) || id);
+      if (id) departmentNames.set(id, cleanEnv(department.name));
     });
 
     const departmentIds = [...departmentNames.keys()];
@@ -309,16 +320,16 @@ export class LarkOAuthService {
         userUrl.searchParams.set("page_size", "50");
         return this.pagedDirectoryItems(userUrl, token, "飞书成员通讯录读取失败");
       }));
-      rawUsers.push(...pages.flat());
-    }
-
-    if (rawUsers.length && !rawUsers.some((item) => {
-      const user = item.user || item;
-      return cleanEnv(user.name || user.cn_name || user.en_name || user.display_name || user.email);
-    })) {
-      throw new Error(
-        "飞书成员通讯录仅返回 ID，应用还需开通“获取用户基本信息”（contact:user.base:readonly）"
-      );
+      const batchUsers = pages.flat();
+      if (batchUsers.length && !batchUsers.some((item) => this.hasReadableUserIdentity(item))) {
+        throw new LarkIntegrationError(
+          "飞书通讯录已返回成员 ID，但姓名字段仍不可见。请确认“获取用户基本信息”已开通、已随应用版本发布，且通讯录数据范围包含目标成员。",
+          "LARK_CONTACT_USER_FIELDS_REDACTED",
+          ["contact:user.base:readonly"],
+          "在飞书开发者后台检查权限管理、应用版本和通讯录数据范围"
+        );
+      }
+      rawUsers.push(...batchUsers);
     }
 
     const usersById = new Map<string, LarkContactUser>();
@@ -346,6 +357,11 @@ export class LarkOAuthService {
       expiresAt: Date.now() + 5 * 60 * 1000
     };
     return users;
+  }
+
+  private hasReadableUserIdentity(item: Record<string, any>): boolean {
+    const user = item.user || item;
+    return Boolean(cleanEnv(user.name || user.cn_name || user.en_name || user.display_name || user.email));
   }
 
   private async pagedDirectoryItems(url: URL, token: string, errorLabel: string): Promise<Record<string, any>[]> {
@@ -425,26 +441,16 @@ export class LarkOAuthService {
   private resolveRoles(profile: NonNullable<LarkUserInfoResponse["data"]>, registerRequester: boolean): UserRole[] {
     const openId = cleanEnv(profile.open_id).toLowerCase();
     const email = cleanEnv(profile.email).toLowerCase();
-    const name = cleanEnv(profile.name).toLowerCase();
-    const configuredDeliveryNames = splitEnvSet(
-      process.env.LARK_DELIVERY_ADMIN_NAMES || "顾语莺,高骊骏,王志,郭显淼"
-    );
     const roleConfigs: RoleConfig[] = [
       {
         role: "super_admin",
         openIds: splitEnvSet(process.env.LARK_SUPER_ADMIN_OPEN_IDS),
         emails: splitEnvSet(process.env.LARK_SUPER_ADMIN_EMAILS)
-      },
-      {
-        role: "delivery_admin",
-        openIds: splitEnvSet(process.env.LARK_DELIVERY_ADMIN_OPEN_IDS),
-        emails: splitEnvSet(process.env.LARK_DELIVERY_ADMIN_EMAILS)
       }
     ];
     const matched = roleConfigs
       .filter((item) => item.openIds.has(openId) || item.emails.has(email))
       .map((item) => item.role);
-    if (configuredDeliveryNames.has(name)) matched.push("delivery_admin");
     if (registerRequester) matched.push("requester");
     return normalizeUserRoles(matched);
   }

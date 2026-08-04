@@ -599,7 +599,15 @@ async function fetchJson(url, options = {}) {
   if (state.adminToken) headers["x-admin-token"] = state.adminToken;
   const response = await fetch(url, { credentials: "same-origin", ...options, headers });
   const result = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(result?.message || "请求失败");
+  if (!response.ok) {
+    const error = new Error(result?.message || "请求失败");
+    if (result && typeof result === "object") {
+      error.code = result.code || "";
+      error.requiredScopes = Array.isArray(result.requiredScopes) ? result.requiredScopes : [];
+      error.action = result.action || "";
+    }
+    throw error;
+  }
   return result;
 }
 
@@ -1263,7 +1271,11 @@ async function searchAdminCandidates(query) {
     renderUserManagement();
   } catch (error) {
     state.adminCandidates = [];
-    el("userManagementSearchStatus").textContent = `飞书通讯录查询失败：${error.message}`;
+    const scopeHint = Array.isArray(error.requiredScopes) && error.requiredScopes.length
+      ? ` 所需权限：${error.requiredScopes.join("、")}。`
+      : "";
+    const actionHint = error.action ? ` ${error.action}。` : "";
+    el("userManagementSearchStatus").textContent = `飞书通讯录查询失败：${error.message}${scopeHint}${actionHint}`;
     el("userManagementSearchStatus").classList.add("error");
     renderUserManagement();
   }

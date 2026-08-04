@@ -103,16 +103,8 @@ export class LarkNotificationService {
     const requesterNames = [...new Set(requesterFields.flatMap((field) => splitNames(cell(record, field))))];
     const adminCandidates = [...new Set(adminAssignmentFields.flatMap((field) => splitNames(cell(record, field))))];
     const known = await this.store.findUsersByNames([...requesterNames, ...adminCandidates]);
-    const configuredAdminNames = new Set(
-      String(process.env.LARK_DELIVERY_ADMIN_NAMES || "顾语莺,高骊骏,王志,郭显淼")
-        .split(/[、,，;；\n]+/)
-        .map(normalizeText)
-        .filter(Boolean)
-    );
     const storedAdminNames = new Set(known.filter(hasAdminRole).map((user) => normalizeText(user.name)));
-    const adminNames = adminCandidates.filter((name) => (
-      configuredAdminNames.has(normalizeText(name)) || storedAdminNames.has(normalizeText(name))
-    ));
+    const adminNames = adminCandidates.filter((name) => storedAdminNames.has(normalizeText(name)));
     const names = [...new Set([...requesterNames, ...adminNames])];
     const byName = new Map(known.map((user) => [normalizeText(user.name), user.openId]));
     const missing = names.filter((name) => !byName.has(normalizeText(name)));
