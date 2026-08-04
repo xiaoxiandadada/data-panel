@@ -1918,7 +1918,9 @@ async function updateRecord(recordId, patch) {
 el("refreshButton").addEventListener("click", loadData);
 el("importButton").addEventListener("click", openImportDialog);
 el("addRecordButton").addEventListener("click", () => {
-  window.open("/api/sync/lark/sources/ledger/open", "_blank", "noopener,noreferrer");
+  // Keep the navigation in the current tab so popup blockers cannot swallow the action and
+  // the authenticated request can reliably reach the server-side Feishu redirect.
+  window.location.assign("/api/sync/lark/sources/ledger/open");
 });
 el("fieldSettingsButton").addEventListener("click", openFieldSettings);
 el("larkSourcesButton").addEventListener("click", () => openLarkSources().catch((error) => alert(error.message)));
