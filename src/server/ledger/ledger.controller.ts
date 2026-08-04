@@ -531,7 +531,13 @@ export class LedgerController {
   @Get("api/admin/users")
   async adminUsers(@Req() request: Request, @Headers("x-admin-token") token?: string) {
     await this.requireSuperAdmin(request, token);
-    return { ok: true, users: (await this.store.listUsers()).filter((user) => this.auth.isAdminUser(user)) };
+    const productionOAuthOnly = process.env.AUTH_MOCK_ENABLED === "false";
+    return {
+      ok: true,
+      users: (await this.store.listUsers()).filter((user) =>
+        this.auth.isAdminUser(user) && (!productionOAuthOnly || !user.openId.startsWith("mock_"))
+      )
+    };
   }
 
   @Patch("api/admin/users/:openId/role")

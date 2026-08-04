@@ -291,6 +291,39 @@ test("super administrator appointment updates roles and writes an audit log", as
   assert.equal(logs[0].record_id, "user:ou_member");
 });
 
+test("OAuth-only administrator list excludes legacy mock identities", async () => {
+  const previous = process.env.AUTH_MOCK_ENABLED;
+  process.env.AUTH_MOCK_ENABLED = "false";
+  const superAdmin = { openId: "ou_super", name: "超级管理员", role: "super_admin", roles: ["super_admin"] };
+  const controller = new LedgerController(
+    {
+      findUserByOpenId: async () => superAdmin,
+      listUsers: async () => [
+        superAdmin,
+        { openId: "ou_delivery", name: "交付管理员", role: "delivery_admin", roles: ["delivery_admin"] },
+        { openId: "mock_super-admin", name: "模拟管理员", role: "super_admin", roles: ["super_admin"] }
+      ]
+    },
+    {
+      sessionCookieName: "delivery_session",
+      verifyToken: () => superAdmin,
+      isAdminUser: (user) => user?.roles?.some((role) => role === "super_admin" || role === "delivery_admin"),
+      hasRole: (user, role) => user?.roles?.includes(role)
+    },
+    {},
+    {},
+    {},
+    {}
+  );
+  try {
+    const result = await controller.adminUsers({ headers: { cookie: "delivery_session=test" } }, undefined);
+    assert.deepEqual(result.users.map((user) => user.openId), ["ou_super", "ou_delivery"]);
+  } finally {
+    if (previous == null) delete process.env.AUTH_MOCK_ENABLED;
+    else process.env.AUTH_MOCK_ENABLED = previous;
+  }
+});
+
 test("three Feishu business tables expose stable online links", () => {
   const keys = [
     "LARK_BASE_WEB_URL",
