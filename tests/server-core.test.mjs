@@ -10,6 +10,7 @@ import { demandToLedgerFields, requesterRecords } from "../dist/server/core/ledg
 import { projectDatasetForAdmin } from "../dist/server/core/admin-views.js";
 import { hasAdminRole, mergeAdministrativeRoles, normalizeUserRoles, primaryUserRole } from "../dist/server/core/user-roles.js";
 import { LarkOAuthService } from "../dist/server/auth/lark-oauth.service.js";
+import { AuthService } from "../dist/server/auth/auth.service.js";
 import { LarkBaseSyncService } from "../dist/server/sync/lark-base-sync.service.js";
 import { LedgerController } from "../dist/server/ledger/ledger.controller.js";
 import { LarkNotificationService } from "../dist/server/notifications/lark-notification.service.js";
@@ -22,6 +23,41 @@ function dataset(rows) {
     records: rows.map((fields, index) => ({ record_id: `test-${index + 1}`, fields }))
   };
 }
+
+function withAuthEnvironment(overrides, callback) {
+  const keys = ["NODE_ENV", "AUTH_MOCK_ENABLED", "ADMIN_PASSWORD", "AUTH_SECRET"];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value == null) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return callback();
+  } finally {
+    for (const key of keys) {
+      if (previous[key] == null) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+}
+
+test("production OAuth-only mode does not require an administrator password", () => {
+  withAuthEnvironment({
+    NODE_ENV: "production",
+    AUTH_MOCK_ENABLED: "false",
+    ADMIN_PASSWORD: null,
+    AUTH_SECRET: "a".repeat(64)
+  }, () => assert.doesNotThrow(() => new AuthService()));
+});
+
+test("production mock authentication still requires a non-default administrator password", () => {
+  withAuthEnvironment({
+    NODE_ENV: "production",
+    AUTH_MOCK_ENABLED: "true",
+    ADMIN_PASSWORD: "admin123",
+    AUTH_SECRET: "b".repeat(64)
+  }, () => assert.throws(() => new AuthService(), /ADMIN_PASSWORD/));
+});
 
 test("incremental import updates matching records and inserts new records", () => {
   const existing = dataset([

@@ -34,10 +34,11 @@ export class AuthService {
 
   constructor() {
     const production = ["production", "prod"].includes(String(process.env.NODE_ENV || "").toLowerCase());
+    const mockAuthEnabled = process.env.AUTH_MOCK_ENABLED !== "false";
     if (production && (this.secret.length < 32 || this.secret === "local-dev-change-before-production")) {
       throw new Error("生产环境 AUTH_SECRET 必须设置为至少 32 字符的随机密钥");
     }
-    if (production && (!process.env.ADMIN_PASSWORD || this.adminPassword === "admin123")) {
+    if (production && mockAuthEnabled && (!process.env.ADMIN_PASSWORD || this.adminPassword === "admin123")) {
       throw new Error("生产环境 ADMIN_PASSWORD 不能使用默认值");
     }
   }
