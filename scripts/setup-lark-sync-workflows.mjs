@@ -42,18 +42,24 @@ function assertReachableWebhookUrl(value) {
   }
 }
 
+// Must stay in step with sourceConfigurations() in src/server/sync/lark-base-sync.service.ts: a
+// Workflow pointing at a table the server does not recognise pushes events that get answered 400.
 const sources = [
   {
-    name: "总台账",
-    tableId: process.env.LARK_LEDGER_TABLE_ID || "tbl7FrAYMpseNuPA"
+    name: "数据团队需求池",
+    tableId: process.env.LARK_POOL_TABLE_ID || "tblrdV8pbi1Ny9mJ"
   },
   {
-    name: "245",
-    tableId: process.env.LARK_245_TABLE_ID || "tbl6dWpodWYuWNq7"
+    name: "战略语料库获取表",
+    tableId: process.env.LARK_CORPUS_TABLE_ID || process.env.LARK_245_TABLE_ID || "tbl6dWpodWYuWNq7"
   },
   {
-    name: "高峰加入",
+    name: "高峰项目获取表",
     tableId: process.env.LARK_GAOFENG_TABLE_ID || "tbl8iFcCizgi0YrU"
+  },
+  {
+    name: "数据团队总表",
+    tableId: process.env.LARK_LEDGER_TABLE_ID || "tbl7FrAYMpseNuPA"
   }
 ];
 

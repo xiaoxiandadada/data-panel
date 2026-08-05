@@ -48,7 +48,7 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
           <button id="userManagementButton" class="button admin-only hidden" type="button">管理员设置</button>
         </div>
         <div class="command-group command-group-primary" aria-label="数据维护">
-          <button id="addRecordButton" class="button admin-only hidden" type="button" title="在飞书中打开数据团队总台账">打开总台账</button>
+          <button id="addRecordButton" class="button admin-only hidden" type="button" title="在飞书中打开数据团队总表">打开数据团队总表</button>
           <button id="importButton" class="button admin-only hidden" type="button">上传 Excel</button>
           <button id="refreshButton" class="button primary admin-only" type="button">刷新数据</button>
         </div>
@@ -126,6 +126,7 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
               <strong id="currentRequesterName">-</strong>
             </div>
             <button id="requestSubmitButton" class="button primary" type="button">提交新需求</button>
+            <a id="larkRequestFormLink" class="button hidden" target="_blank" rel="noopener noreferrer" href="#">在飞书中填写</a>
             <button id="downloadMyDataButton" class="button" type="button">下载数据</button>
           </div>
         </div>
@@ -296,9 +297,10 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
             <label>
               <span>数据来源</span>
               <select id="excelImportSource">
-                <option value="ledger">总台账</option>
-                <option value="245">245</option>
-                <option value="gaofeng">高峰加入</option>
+                <option value="ledger">数据团队总表</option>
+                <option value="corpus">战略语料库获取表</option>
+                <option value="pool">数据团队需求池</option>
+                <option value="gaofeng">高峰项目获取表</option>
               </select>
             </label>
             <label>
@@ -428,6 +430,11 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
             <div>
               <h2>提交新需求</h2>
               <p>参考飞书提需求表录入，提交后自动进入交付管线初始阶段</p>
+              <p id="larkRequestFormHint" class="hidden">
+                习惯在飞书里填的话，也可以
+                <a id="larkRequestFormDialogLink" target="_blank" rel="noopener noreferrer" href="#">打开飞书需求表单</a>
+                ——飞书表单写入需求池后，需要等一次同步（最长 5 分钟）才会出现在这里。
+              </p>
             </div>
             <button id="closeRequestDialog" class="icon-button" type="button" title="关闭">×</button>
           </div>

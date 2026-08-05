@@ -2,6 +2,7 @@ import { Injectable, OnApplicationBootstrap, OnModuleDestroy } from "@nestjs/com
 import { randomUUID } from "node:crypto";
 import { LarkOAuthService } from "../auth/lark-oauth.service.js";
 import { stringifyCell } from "../core/ledger-utils.js";
+import { applySourceAliasesToDataset, applySourceFieldAliases, type LarkSourceKey } from "../core/source-fields.js";
 import type { FieldValue, ImportBatch, LedgerRecord } from "../core/types.js";
 import { LedgerStoreService } from "../infra/ledger-store.service.js";
 import { QueueService } from "../infra/queue.service.js";
@@ -21,7 +22,7 @@ export interface LarkSyncSourceStatus {
 }
 
 export interface LarkSyncSource {
-  key: "ledger" | "project-245" | "gaofeng";
+  key: LarkSourceKey;
   source: string;
   tableId: string;
   viewId: string;
@@ -118,15 +119,16 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
     const source = (
       key: LarkSyncSource["key"],
       name: string,
-      tableIdEnv: string,
-      viewIdEnv: string,
-      urlEnv: string,
+      tableIdEnvs: string[],
+      viewIdEnvs: string[],
+      urlEnvs: string[],
       defaultTableId: string,
       defaultViewId: string
     ): LarkSyncSource => {
-      const tableId = String(process.env[tableIdEnv] || defaultTableId).trim();
-      const viewId = String(process.env[viewIdEnv] || defaultViewId).trim();
-      const configuredUrl = String(process.env[urlEnv] || "").trim();
+      const firstSet = (envs: string[]) => envs.map((env) => String(process.env[env] || "").trim()).find(Boolean) || "";
+      const tableId = firstSet(tableIdEnvs) || defaultTableId;
+      const viewId = firstSet(viewIdEnvs) || defaultViewId;
+      const configuredUrl = firstSet(urlEnvs);
       return {
         key,
         source: name,
@@ -136,32 +138,47 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
         configured: Boolean(tableId)
       };
     };
+    // Order matters and is the design, not a coincidence. mergeFields is last-writer-wins for any
+    // non-empty incoming value, so the authoritative source for a shared column has to run last.
+    // 数据团队总表 owns delivery progress, so it goes last; 数据团队需求池 contributes requester identity
+    // and an intake-side 进展状态 that the 总表 is entitled to overrule.
     return [
       source(
-        "ledger",
-        "总台账",
-        "LARK_LEDGER_TABLE_ID",
-        "LARK_LEDGER_VIEW_ID",
-        "LARK_LEDGER_URL",
-        "tbl7FrAYMpseNuPA",
-        "vewkBG8gpp"
+        "pool",
+        "数据团队需求池",
+        ["LARK_POOL_TABLE_ID"],
+        ["LARK_POOL_VIEW_ID"],
+        ["LARK_POOL_URL"],
+        "tblrdV8pbi1Ny9mJ",
+        ""
       ),
       source(
-        "project-245",
-        "245",
-        "LARK_245_TABLE_ID",
-        "LARK_245_VIEW_ID",
-        "LARK_245_URL",
+        "corpus",
+        "战略语料库获取表",
+        // LARK_245_* was the original name for this table and is still read so an already-deployed
+        // environment keeps working without an env change.
+        ["LARK_CORPUS_TABLE_ID", "LARK_245_TABLE_ID"],
+        ["LARK_CORPUS_VIEW_ID", "LARK_245_VIEW_ID"],
+        ["LARK_CORPUS_URL", "LARK_245_URL"],
         "tbl6dWpodWYuWNq7",
         "vew41dhWuZ"
       ),
       source(
         "gaofeng",
-        "高峰加入",
-        "LARK_GAOFENG_TABLE_ID",
-        "LARK_GAOFENG_VIEW_ID",
-        "LARK_GAOFENG_URL",
+        "高峰项目获取表",
+        ["LARK_GAOFENG_TABLE_ID"],
+        ["LARK_GAOFENG_VIEW_ID"],
+        ["LARK_GAOFENG_URL"],
         "tbl8iFcCizgi0YrU",
+        "vewkBG8gpp"
+      ),
+      source(
+        "ledger",
+        "数据团队总表",
+        ["LARK_LEDGER_TABLE_ID"],
+        ["LARK_LEDGER_VIEW_ID"],
+        ["LARK_LEDGER_URL"],
+        "tbl7FrAYMpseNuPA",
         "vewkBG8gpp"
       )
     ];
@@ -223,9 +240,18 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
       const errors: string[] = [];
       const initialDataset = await this.store.readDataset();
       const ledgerSeeded = initialDataset.records.length > 0;
+      // Captured before the loop: a table gains its baseline at the end of its own first successful
+      // read, and a table reading for the first time in this round must not contribute to the diff.
+      const baselinedAtStart = new Set(sources.filter((item) => this.notificationBaselines.has(item.key)).map((item) => item.key));
+      // Business keys this round touched, mapped to the source that supplied them. Collected across
+      // all sources and diffed once at the end rather than per source: several tables carry 获取状态
+      // for the same requirement (需求池.进展状态 disagrees with 数据团队总表 on 17 records), so a
+      // per-source diff would see the pool write X, then the 总表 overwrite it with Y, and push a
+      // notification for a status that never actually changed — every single sync cycle.
+      const touchedKeys = new Map<string, string>();
       for (const source of sources) {
         try {
-          const incoming = await this.lark.listBaseDataset(appToken, source.tableId, source.viewId);
+          const incoming = applySourceAliasesToDataset(source.key, await this.lark.listBaseDataset(appToken, source.tableId, source.viewId));
           const existing = await this.store.readDataset();
           const merged = mergeImportedDataset(existing, incoming, source.source);
           const batch: ImportBatch = {
@@ -239,11 +265,10 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
           };
           await this.store.saveDataset(merged.dataset);
           await this.store.appendImportBatch(batch);
-          // Only a table that already has a baseline can produce a meaningful diff. Reading a table
-          // for the first time — a fresh deploy, or one table's permission arriving later than the
-          // others — would otherwise report every historical status as a change.
-          if (ledgerSeeded && this.notificationBaselines.has(source.key)) {
-            await this.enqueueStatusChanges(existing.records, merged.dataset.records, incoming.records, source.source);
+          if (ledgerSeeded && baselinedAtStart.has(source.key)) {
+            for (const record of incoming.records || []) {
+              touchedKeys.set(importBusinessKey(record.fields || {}), source.source);
+            }
           }
           await this.queue.enqueue("dataset.synced", { source: source.source, count: incoming.records.length });
           const syncedAt = new Date().toISOString();
@@ -268,6 +293,12 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
           console.warn(`Lark Base source sync failed: ${sourceError}`);
         }
       }
+      // One diff for the whole round, against the state before any source ran, so only a status that
+      // survives every source's merge is reported as a change.
+      if (touchedKeys.size) {
+        const finalDataset = await this.store.readDataset();
+        await this.enqueueStatusChanges(initialDataset.records, finalDataset.records, touchedKeys);
+      }
       if (!results.length && errors.length) throw new Error(errors.join("；"));
       if (results.length) this.lastSyncedAt = new Date().toISOString();
       this.lastError = errors.join("；");
@@ -283,14 +314,12 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
   private async enqueueStatusChanges(
     beforeRecords: LedgerRecord[],
     afterRecords: LedgerRecord[],
-    incomingRecords: LedgerRecord[],
-    source: string
+    touchedKeys: Map<string, string>
   ): Promise<void> {
     const beforeByKey = new Map(beforeRecords.map((record) => [importBusinessKey(record.fields || {}), record]));
     const afterByKey = new Map(afterRecords.map((record) => [importBusinessKey(record.fields || {}), record]));
-    const changedKeys = new Set((incomingRecords || []).map((record) => importBusinessKey(record.fields || {})));
 
-    for (const key of changedKeys) {
+    for (const [key, source] of touchedKeys) {
       const before = beforeByKey.get(key);
       const after = afterByKey.get(key);
       if (!before || !after) continue;
@@ -322,14 +351,17 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
       // Feishu's single-record read costs ~2s, so a burst of edits is fetched concurrently.
       // Only the merge stays serial — it is a read-modify-write that must not interleave.
       const fetched = await this.fetchRecords(appToken, source.tableId, recordIds);
-      for (const incoming of fetched) {
-        if (!incoming) {
+      for (const raw of fetched) {
+        if (!raw) {
           missing += 1;
           continue;
         }
+        // Same translation the full sync applies, so a webhook-delivered row keys and merges
+        // identically to the same row arriving through the 5-minute full read.
+        const incomingFields = applySourceFieldAliases(source.key, raw.fields || {});
         const result = await this.store.upsertRecordByBusinessKey(
-          incoming.fields || {},
-          (before) => mergeFields(before, incoming.fields || {}, source.source),
+          incomingFields,
+          (before) => mergeFields(before, incomingFields, source.source),
           {
             status: "ok",
             syncedAt: new Date().toLocaleString("zh-CN", { hour12: false }),

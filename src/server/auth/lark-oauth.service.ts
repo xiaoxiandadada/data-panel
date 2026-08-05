@@ -1,5 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import type { AppUser, Dataset, LedgerRecord, UserRole } from "../core/types.js";
+import { normalizeBaseFieldValues } from "../core/ledger-utils.js";
 import { normalizeUserRoles, primaryUserRole } from "../core/user-roles.js";
 
 interface LarkOAuthTokenResponse {
@@ -54,6 +55,18 @@ export interface LarkContactUser {
   avatar?: string;
 }
 
+/**
+ * How much of the company the application is actually allowed to see. Feishu's 通讯录权限范围 is granted
+ * per department in the admin console, and members outside it are simply absent from every contact
+ * API — indistinguishable from "no such person" unless the boundary is reported alongside the
+ * results. Surfacing it is what turns an empty search box into an actionable message.
+ */
+export interface LarkDirectoryScope {
+  departmentCount: number;
+  userCount: number;
+  reachableUserCount: number;
+}
+
 export class LarkIntegrationError extends Error {
   constructor(
     message: string,
@@ -93,7 +106,15 @@ export class LarkOAuthService {
   private readonly authHost = cleanEnv(process.env.LARK_AUTH_HOST) || "https://open.feishu.cn";
   private readonly apiHost = cleanEnv(process.env.LARK_API_HOST) || "https://open.feishu.cn";
   private tenantTokenCache: { token: string; expiresAt: number } | null = null;
-  private directoryCache: { users: LarkContactUser[]; expiresAt: number } | null = null;
+  private directoryCache: { users: LarkContactUser[]; expiresAt: number; scope: LarkDirectoryScope } | null = null;
+  // A full directory walk costs ~120 Feishu requests and tens of seconds, so concurrent searches
+  // must share one in-flight walk rather than each starting their own.
+  private directoryLoad: Promise<LarkContactUser[]> | null = null;
+
+  onApplicationBootstrap() {
+    // The walk is slow enough that whoever searches first would otherwise absorb the whole cost.
+    this.prefetchDirectory();
+  }
 
   isConfigured(): boolean {
     return Boolean(this.appId && this.appSecret && this.redirectUri);
@@ -198,7 +219,7 @@ export class LarkOAuthService {
       const items = Array.isArray(payload.data?.items) ? payload.data.items : [];
       records.push(...items.map((item: Record<string, any>, index: number) => ({
         record_id: cleanEnv(item.record_id || item.id) || `lark-${records.length + index + 1}`,
-        fields: item.fields || {}
+        fields: normalizeBaseFieldValues(item.fields || {})
       })));
       pageToken = payload.data?.has_more ? cleanEnv(payload.data?.page_token) : "";
     } while (pageToken);
@@ -240,7 +261,7 @@ export class LarkOAuthService {
     if (!record) return null;
     return {
       record_id: cleanEnv(record.record_id || record.id) || cleanRecordId,
-      fields: record.fields || {}
+      fields: normalizeBaseFieldValues(record.fields || {})
     };
   }
 
@@ -290,9 +311,36 @@ export class LarkOAuthService {
   }
 
   private async directoryUsers(): Promise<LarkContactUser[]> {
-    if (this.directoryCache && this.directoryCache.expiresAt > Date.now()) {
-      return this.directoryCache.users;
+    const cached = this.directoryCache;
+    if (cached && cached.expiresAt > Date.now()) return cached.users;
+    // Stale-while-revalidate. Rebuilding takes tens of seconds, so once a directory has been built
+    // once, an expired copy is served immediately and refreshed in the background: a stale name is
+    // far better for the admin than a request that appears to hang.
+    if (cached) {
+      void this.loadDirectory().catch((error) => console.warn(`Lark directory refresh failed: ${(error as Error).message}`));
+      return cached.users;
     }
+    return this.loadDirectory();
+  }
+
+  /** Warms the directory cache without blocking anything, so the first admin search is not the one
+   * that pays for the full walk. */
+  prefetchDirectory(): void {
+    if (!this.isBotConfigured() || this.directoryCache || this.directoryLoad) return;
+    void this.loadDirectory().catch((error) => console.warn(`Lark directory prefetch failed: ${(error as Error).message}`));
+  }
+
+  private loadDirectory(): Promise<LarkContactUser[]> {
+    // Collapse concurrent callers onto one walk. Without this, three admins typing at once trigger
+    // three ~120-request traversals that throttle each other into minutes of latency.
+    if (this.directoryLoad) return this.directoryLoad;
+    this.directoryLoad = this.buildDirectory().finally(() => {
+      this.directoryLoad = null;
+    });
+    return this.directoryLoad;
+  }
+
+  private async buildDirectory(): Promise<LarkContactUser[]> {
     const token = await this.tenantAccessToken();
     const departmentUrl = new URL("/open-apis/contact/v3/departments/0/children", this.apiHost);
     departmentUrl.searchParams.set("department_id_type", "open_department_id");
@@ -311,8 +359,12 @@ export class LarkOAuthService {
 
     const departmentIds = [...departmentNames.keys()];
     const rawUsers: Record<string, any>[] = [];
-    for (let index = 0; index < departmentIds.length; index += 6) {
-      const pages = await Promise.all(departmentIds.slice(index, index + 6).map(async (departmentId) => {
+    // 90 departments needed 118 paged requests at ~270ms each. Six at a time made that 32 seconds,
+    // which the browser reads as a hang; 20 keeps it a few seconds and stays well inside Feishu's
+    // contact rate limit.
+    const departmentConcurrency = 20;
+    for (let index = 0; index < departmentIds.length; index += departmentConcurrency) {
+      const pages = await Promise.all(departmentIds.slice(index, index + departmentConcurrency).map(async (departmentId) => {
         const userUrl = new URL("/open-apis/contact/v3/users/find_by_department", this.apiHost);
         userUrl.searchParams.set("user_id_type", "open_id");
         userUrl.searchParams.set("department_id_type", "open_department_id");
@@ -354,9 +406,41 @@ export class LarkOAuthService {
     const users = [...usersById.values()].sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
     this.directoryCache = {
       users,
-      expiresAt: Date.now() + 5 * 60 * 1000
+      // Half an hour rather than five minutes: the walk is expensive, staff lists change slowly, and
+      // an expired entry is now refreshed in the background instead of blocking a search.
+      expiresAt: Date.now() + 30 * 60 * 1000,
+      scope: await this.readDirectoryScope(token, users.length)
     };
     return users;
+  }
+
+  /**
+   * Reads the application's 通讯录权限范围 so a fruitless search can say which boundary it hit. Best
+   * effort: a failure here must never fail the search itself.
+   */
+  private async readDirectoryScope(token: string, reachableUserCount: number): Promise<LarkDirectoryScope> {
+    const empty = { departmentCount: 0, userCount: 0, reachableUserCount };
+    try {
+      const url = new URL("/open-apis/contact/v3/scopes", this.apiHost);
+      url.searchParams.set("user_id_type", "open_id");
+      url.searchParams.set("department_id_type", "open_department_id");
+      url.searchParams.set("page_size", "50");
+      const response = await fetch(url, { headers: { authorization: `Bearer ${token}` } });
+      const payload = (await response.json().catch(() => null)) as Record<string, any> | null;
+      if (!response.ok || payload?.code !== 0) return empty;
+      return {
+        departmentCount: (payload.data?.department_ids || []).length,
+        userCount: (payload.data?.user_ids || []).length,
+        reachableUserCount
+      };
+    } catch {
+      return empty;
+    }
+  }
+
+  /** Null until the directory has been built at least once. */
+  directoryScope(): LarkDirectoryScope | null {
+    return this.directoryCache?.scope || null;
   }
 
   private hasReadableUserIdentity(item: Record<string, any>): boolean {

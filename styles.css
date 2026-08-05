@@ -234,6 +234,11 @@ h2 {
   padding: 0 16px;
 }
 
+/* The Feishu form entry point is an anchor so it opens in a new tab, but reads as a button. */
+a.button {
+  text-decoration: none;
+}
+
 .button.primary {
   border-color: var(--brand);
   background: var(--brand);

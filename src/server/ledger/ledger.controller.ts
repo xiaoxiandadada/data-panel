@@ -112,7 +112,13 @@ export class LedgerController {
     }
     const safeLimit = Math.min(Math.max(Number(limit || 10), 1), 20);
     try {
-      return { ok: true, users: await this.larkOAuth.searchUsers(q, safeLimit) };
+      const users = await this.larkOAuth.searchUsers(q, safeLimit);
+      // The directory only ever contains the departments granted to the application in 飞书 admin
+      // console (通讯录权限范围). Someone outside that boundary is absent from every contact API, which
+      // looks exactly like "no such person" — so an empty result ships the boundary with it and the
+      // client can say which of the two happened.
+      const scope = users.length ? null : this.larkOAuth.directoryScope();
+      return { ok: true, users, ...(scope ? { scope } : {}) };
     } catch (error) {
       const integration = error instanceof LarkIntegrationError ? error : null;
       throw new HttpException({
@@ -164,8 +170,24 @@ export class LedgerController {
       authenticated: Boolean(user),
       user,
       larkOAuthEnabled: this.larkOAuth.isConfigured(),
+      requestFormUrl: this.requestFormUrl(),
       mockUsers: process.env.AUTH_MOCK_ENABLED === "false" ? [] : this.auth.mockLoginUsers()
     };
+  }
+
+  /**
+   * The Feishu share form requesters can fill in without logging into this application. Empty when
+   * unconfigured so the entry point disappears rather than rendering a dead link, and restricted to
+   * https because the value ends up in an anchor href.
+   */
+  private requestFormUrl(): string {
+    const configured = String(process.env.LARK_REQUEST_FORM_URL || "").trim();
+    if (!configured) return "";
+    try {
+      return new URL(configured).protocol === "https:" ? configured : "";
+    } catch {
+      return "";
+    }
   }
 
   @Post("api/auth/logout")
@@ -765,12 +787,18 @@ export class LedgerController {
     });
   }
 
+  /**
+   * Excel imports and Base syncs both stamp `数据来源`, so they have to agree on one vocabulary or the
+   * column ends up carrying two names for the same table. The canonical names are the Feishu table
+   * names; the older labels stay accepted as input so existing clients and saved forms keep working.
+   */
   private importSource(source: string | undefined): string {
-    const normalized = String(source || "总台账").trim().toLowerCase();
-    if (["gaofeng", "高峰", "高峰加入", "data-team", "team"].includes(normalized)) return "高峰加入";
-    if (["245", "project-245", "项目245", "request", "requests"].includes(normalized)) return "245";
-    if (["ledger", "总台账"].includes(normalized)) return "总台账";
-    return String(source || "总台账").trim().slice(0, 40) || "总台账";
+    const normalized = String(source || "数据团队总表").trim().toLowerCase();
+    if (["ledger", "总台账", "数据团队总表"].includes(normalized)) return "数据团队总表";
+    if (["corpus", "245", "project-245", "项目245", "request", "requests", "战略语料库", "战略语料库获取表"].includes(normalized)) return "战略语料库获取表";
+    if (["pool", "需求池", "数据团队需求池"].includes(normalized)) return "数据团队需求池";
+    if (["gaofeng", "高峰", "高峰加入", "高峰项目获取表", "data-team", "team"].includes(normalized)) return "高峰项目获取表";
+    return String(source || "数据团队总表").trim().slice(0, 40) || "数据团队总表";
   }
 
   private secureEqual(value: string, expected: string): boolean {

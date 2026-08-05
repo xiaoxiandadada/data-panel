@@ -175,6 +175,7 @@ let state = {
   currentUser: null,
   mockUsers: [],
   larkOAuthEnabled: false,
+  requestFormUrl: "",
   requesterAuthMode: "login",
   query: "",
   draft: "",
@@ -382,7 +383,7 @@ function updateNotice(meta) {
       ? escapeHtml(state.authError)
       : meta.status === "error"
       ? `数据读取失败：${escapeHtml(meta.message || "暂时无法连接服务")}。请确认前端与后端服务均已启动后刷新。`
-      : "当前台账为空。管理员可通过“去总台账添加”维护在线表格，或上传 Excel。";
+      : "当前台账为空。管理员可通过“打开数据团队总表”维护在线表格，或上传 Excel。";
   } else {
     notice.classList.add("hidden");
   }
@@ -700,6 +701,20 @@ function writePickedPerson(input, name, multiple) {
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+/**
+ * Turns an empty contact search into an actionable sentence. Feishu只返回应用「通讯录权限范围」内的成员，
+ * 范围外的人和「查无此人」在接口上完全一样，所以把范围一并说清，管理员才知道该去改权限还是换关键词。
+ */
+function contactScopeHint(keyword, scope) {
+  const base = `飞书通讯录中没有找到“${keyword}”。`;
+  if (!scope) return base;
+  const reachable = Number(scope.reachableUserCount || 0);
+  const departments = Number(scope.departmentCount || 0);
+  if (!reachable) return `${base}当前应用尚未读取到任何通讯录成员，请检查飞书后台的通讯录权限范围。`;
+  return `${base}当前应用的通讯录权限范围只覆盖 ${departments} 个部门、可见 ${reachable} 人；`
+    + `如果对方在范围外，需要在飞书开发者后台扩大「通讯录权限范围」才能搜到。`;
+}
+
 async function searchPersonPicker(query) {
   const keyword = String(query || "").trim();
   const container = el("personPickerResults");
@@ -708,7 +723,9 @@ async function searchPersonPicker(query) {
     return;
   }
   const requestId = ++state.personSearchRequestId;
-  container.innerHTML = `<div class="person-picker-empty">正在搜索...</div>`;
+  // The first search after a restart has to load the whole authorized directory (tens of seconds),
+  // so say so rather than leaving a bare spinner that looks stuck.
+  container.innerHTML = `<div class="person-picker-empty">正在搜索…首次搜索需要加载企业通讯录，可能要十几秒。</div>`;
   try {
     const result = await fetchJson(`/api/lark/users/search?q=${encodeURIComponent(keyword)}&limit=12`);
     if (requestId !== state.personSearchRequestId) return;
@@ -721,7 +738,7 @@ async function searchPersonPicker(query) {
         </span>
         <small>选择</small>
       </button>
-    `).join("") : `<div class="person-picker-empty">没有匹配的飞书人员</div>`;
+    `).join("") : `<div class="person-picker-empty">${escapeHtml(contactScopeHint(keyword, result.scope))}</div>`;
   } catch (error) {
     if (requestId !== state.personSearchRequestId) return;
     container.innerHTML = `<div class="person-picker-empty">${escapeHtml(error.message || "飞书人员搜索失败")}</div>`;
@@ -1260,14 +1277,14 @@ async function searchAdminCandidates(query) {
     renderUserManagement();
     return;
   }
-  el("userManagementSearchStatus").textContent = "正在查询飞书企业通讯录…";
+  el("userManagementSearchStatus").textContent = "正在查询飞书企业通讯录…首次查询需要加载通讯录，可能要十几秒。";
   el("userManagementSearchStatus").classList.remove("error");
   try {
     const result = await fetchJson(`/api/lark/users/search?q=${encodeURIComponent(keyword)}&limit=12`);
     state.adminCandidates = result.users || [];
     el("userManagementSearchStatus").textContent = state.adminCandidates.length
       ? `找到 ${state.adminCandidates.length} 位飞书企业成员，请在下方任命。`
-      : `飞书通讯录中没有找到“${keyword}”。`;
+      : contactScopeHint(keyword, result.scope);
     renderUserManagement();
   } catch (error) {
     state.adminCandidates = [];
@@ -1595,6 +1612,8 @@ async function loadSession() {
   const session = await fetchJson(`/api/auth/me?t=${Date.now()}`);
   state.mockUsers = session.mockUsers || [];
   state.larkOAuthEnabled = Boolean(session.larkOAuthEnabled);
+  state.requestFormUrl = String(session.requestFormUrl || "");
+  renderLarkRequestForm();
   const params = new URLSearchParams(window.location.search);
   if (session.authenticated) {
     applyUser(session.user, params.get("mode") || "");
@@ -1707,6 +1726,24 @@ function renderDemandControl(field) {
     `;
   }
   return `<input name="${escapeHtml(field.name)}" type="${type}" value="${escapeHtml(defaultValue)}" ${required} ${placeholder} />`;
+}
+
+/**
+ * Shows the Feishu share form only when the deployment configured one. The two intake paths coexist on
+ * purpose: this application writes straight into the ledger, while the Feishu form writes into
+ * 数据团队需求池 and reaches here on the next sync — so the delay has to be stated, not implied.
+ */
+function renderLarkRequestForm() {
+  const url = state.requestFormUrl;
+  const link = el("larkRequestFormLink");
+  if (link) {
+    link.classList.toggle("hidden", !url);
+    if (url) link.href = url;
+  }
+  const hint = el("larkRequestFormHint");
+  const dialogLink = el("larkRequestFormDialogLink");
+  if (hint) hint.classList.toggle("hidden", !url);
+  if (dialogLink && url) dialogLink.href = url;
 }
 
 function renderRequestForm() {

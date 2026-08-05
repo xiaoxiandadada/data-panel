@@ -65,6 +65,64 @@ export function normalizeText(value: unknown): string {
   return String(value || "").replace(/\u200B/g, "").trim().toLowerCase();
 }
 
+const dayMillis = 86_400_000;
+const dateFieldPattern = /\u65F6\u95F4|\u65E5\u671F|\u65F6\u671F/;
+// A window wide enough for anything this ledger records, narrow enough that quantities and
+// durations never look like instants.
+const epochFloor = Date.UTC(2000, 0, 1);
+const epochCeiling = Date.UTC(2100, 0, 1);
+
+/**
+ * Renders one Feishu Base timestamp the way the ledger already stores dates (`2026/07/01`).
+ *
+ * Base anchors date-only fields at UTC midnight and stores datetime fields as real instants, so
+ * the two need different zones to land on the calendar day a person sees in the Base: formatting a
+ * UTC-midnight value in Asia/Shanghai is still the same day, but formatting a Shanghai-evening
+ * instant in UTC would report the day before.
+ */
+function epochToLedgerDate(millis: number): string {
+  const timeZone = millis % dayMillis === 0 ? "UTC" : "Asia/Shanghai";
+  const parts = new Intl.DateTimeFormat("zh-CN", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(new Date(millis));
+  const part = (type: string) => parts.find((item) => item.type === type)?.value || "";
+  return `${part("year")}/${part("month")}/${part("day")}`;
+}
+
+/**
+ * Converts the epoch milliseconds Feishu Base returns for date fields into the ledger's own date
+ * text. Without this the first successful full sync overwrites every date the Excel import seeded
+ * as `2026/07/01` with a raw `1785919697711`, which both the requester view and the delivery
+ * metrics then fail to read.
+ *
+ * Two guards, because neither is sufficient alone. The field name must look like a date, or numeric
+ * fields such as `\u7ED3\u7B97\u91D1\u989D` would be mangled into dates. The value must also be a plausible instant,
+ * because `\u671F\u671B\u4EA4\u4ED8\u65E5\u671F` is a text field in the \u603B\u8868 holding values like `\u6700\u5927\u503C\uFF08\u5F85\u586B\uFF09`, and short
+ * numbers such as durations must survive untouched.
+ */
+export function normalizeBaseFieldValues(fields: Record<string, FieldValue>): Record<string, FieldValue> {
+  const normalized: Record<string, FieldValue> = {};
+  for (const [field, value] of Object.entries(fields || {})) {
+    normalized[field] = dateFieldPattern.test(field) ? normalizeBaseDateValue(value) : value;
+  }
+  return normalized;
+}
+
+function normalizeBaseDateValue(value: FieldValue): FieldValue {
+  if (Array.isArray(value)) return value.map((item) => normalizeBaseDateValue(item as FieldValue)) as FieldValue;
+  const raw = typeof value === "number" ? value : /^\d{10,13}$/.test(String(value ?? "").trim())
+    ? Number(String(value).trim())
+    : Number.NaN;
+  if (!Number.isFinite(raw)) return value;
+  // Tolerate second precision: a ten-digit value is seconds, anything longer is already millis.
+  const millis = raw < 1e11 ? raw * 1000 : raw;
+  if (millis < epochFloor || millis > epochCeiling) return value;
+  return epochToLedgerDate(millis);
+}
+
 export const businessKeyFields = ["\u4EFB\u52A1\u4EE3\u7801", "2026\u9700\u6C42\u7F16\u7801", "\u9700\u6C42\u7F16\u7801", "\u9879\u76EE\u540D\u79F0"];
 
 // Identifies the same requirement across the three Feishu tables and Excel imports.

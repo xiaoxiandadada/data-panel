@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import { mergeImportedDataset, importBusinessKey } from "../dist/server/ledger/parse-utils.js";
 import { analyzeDeliveryEfficiency } from "../dist/server/metrics/delivery-efficiency.service.js";
 import { isCompletedStatus } from "../dist/server/metrics/satisfaction.service.js";
-import { demandToLedgerFields, requesterRecords } from "../dist/server/core/ledger-utils.js";
+import { demandToLedgerFields, normalizeBaseFieldValues, requesterRecords } from "../dist/server/core/ledger-utils.js";
+import { applySourceAliasesToDataset, applySourceFieldAliases } from "../dist/server/core/source-fields.js";
 import { projectDatasetForAdmin } from "../dist/server/core/admin-views.js";
 import { hasAdminRole, mergeAdministrativeRoles, normalizeUserRoles, primaryUserRole } from "../dist/server/core/user-roles.js";
 import { LarkOAuthService } from "../dist/server/auth/lark-oauth.service.js";
@@ -61,7 +62,7 @@ test("production mock authentication still requires a non-default administrator 
 
 test("incremental import updates matching records and inserts new records", () => {
   const existing = dataset([
-    { "项目名称": "Alpha", "任务代码": "PJ-001", "获取状态": "需求澄清中", "数据来源": "总台账" }
+    { "项目名称": "Alpha", "任务代码": "PJ-001", "获取状态": "需求澄清中", "数据来源": "数据团队需求池" }
   ]);
   const incoming = dataset([
     { "项目名称": "Alpha", "任务代码": "PJ-001", "获取状态": "已完结" },
@@ -72,7 +73,7 @@ test("incremental import updates matching records and inserts new records", () =
   assert.deepEqual(result.summary, { total: 2, inserted: 1, updated: 1, unchanged: 0, conflicts: 0 });
   assert.equal(result.dataset.records.length, 2);
   assert.equal(result.dataset.records[0].fields["获取状态"], "已完结");
-  assert.equal(result.dataset.records[0].fields["数据来源"], "总台账、数据团队总表");
+  assert.equal(result.dataset.records[0].fields["数据来源"], "数据团队需求池、数据团队总表");
 });
 
 test("incremental import reports duplicate business keys", () => {
@@ -80,9 +81,66 @@ test("incremental import reports duplicate business keys", () => {
     { "任务代码": "PJ-003", "项目名称": "Gamma" },
     { "任务代码": "PJ-003", "项目名称": "Gamma updated" }
   ]);
-  const result = mergeImportedDataset(dataset([]), incoming, "总台账");
+  const result = mergeImportedDataset(dataset([]), incoming, "数据团队总表");
   assert.equal(result.summary.conflicts, 1);
   assert.equal(result.dataset.records.length, 1);
+});
+
+test("Feishu Base timestamps become ledger date strings", () => {
+  // Base returns every date and datetime field as epoch milliseconds. Writing that through unchanged
+  // would replace 需求提出时间 and 期望交付日期 — both requester-visible — with a bare number.
+  const normalized = normalizeBaseFieldValues({
+    "需求提出时间": 1785715200000,
+    "供应商承诺交付时期": "1785715200000",
+    "期望交付日期": "最大值（待填）",
+    "签收交付量（GB）": 1024,
+    "预算金额": 1785715200000
+  });
+  assert.equal(normalized["需求提出时间"], "2026/08/03");
+  assert.equal(normalized["供应商承诺交付时期"], "2026/08/03");
+  // A text column that merely happens to be named like a date keeps whatever a person typed.
+  assert.equal(normalized["期望交付日期"], "最大值（待填）");
+  // Quantities and money are never converted, however large: only date-named columns are candidates.
+  assert.equal(normalized["签收交付量（GB）"], 1024);
+  assert.equal(normalized["预算金额"], 1785715200000);
+});
+
+test("date-only Feishu fields keep their calendar day instead of shifting back one", () => {
+  // Base anchors date-only fields at UTC midnight, so formatting them in Asia/Shanghai is still the
+  // same day, while a real datetime has to be read in Shanghai time or it reports the previous day.
+  assert.equal(normalizeBaseFieldValues({ "期望交付时间": Date.UTC(2026, 6, 1) })["期望交付时间"], "2026/07/01");
+  assert.equal(
+    normalizeBaseFieldValues({ "实际验收通过时间": Date.UTC(2026, 6, 1, 15, 30) })["实际验收通过时间"],
+    "2026/07/01"
+  );
+});
+
+test("source field aliases translate table-specific columns without discarding the original", () => {
+  const aliased = applySourceFieldAliases("pool", {
+    "需求描述": "语音语料采集",
+    "需求方": "张三",
+    "进展状态": "需求澄清中"
+  });
+  // The canonical column is what the business key and the requester view read.
+  assert.equal(aliased["项目名称"], "语音语料采集");
+  assert.equal(aliased["需求人"], "张三");
+  assert.equal(aliased["获取状态"], "需求澄清中");
+  // The source column stays so nothing that was visible in Feishu disappears from the ledger.
+  assert.equal(aliased["需求描述"], "语音语料采集");
+});
+
+test("an alias never overwrites a canonical value the record already carries", () => {
+  const aliased = applySourceFieldAliases("pool", { "需求描述": "别名来源", "项目名称": "原始值" });
+  assert.equal(aliased["项目名称"], "原始值");
+});
+
+test("aliasing a dataset also republishes the field list the merge reads", () => {
+  // mergeImportedDataset builds the merged column list from dataset.fields, so a record-only
+  // translation would key correctly and then still be filed under the untranslated column name.
+  const aliased = applySourceAliasesToDataset("gaofeng", dataset([{ "验收通过交付量（GB）": "12" }]));
+  const names = aliased.fields.map((field) => field.name);
+  assert.equal(names.includes("验收通过交付量(GB)"), true);
+  assert.equal(aliased.records[0].fields["验收通过交付量(GB)"], "12");
 });
 
 test("business key prioritizes task code over project name", () => {
@@ -182,7 +240,7 @@ test("delivery efficiency follows the six-stage Q1 and Q2 calculation rules", ()
       "开始执行时间": "2026-01-10",
       "期望交付日期": "2026-01-20",
       "实际交付完成日期": "2026-01-25",
-      "数据来源": "总台账"
+      "数据来源": "数据团队总表"
     },
     {
       "项目名称": "Q2 项目",
@@ -194,7 +252,7 @@ test("delivery efficiency follows the six-stage Q1 and Q2 calculation rules", ()
       "开始执行时间": "2026-04-08",
       "期望交付日期": "2026-04-20",
       "实际交付完成日期": "2026-04-18",
-      "数据来源": "245"
+      "数据来源": "战略语料库获取表"
     }
   ]);
   const result = analyzeDeliveryEfficiency(source);
@@ -324,11 +382,15 @@ test("OAuth-only administrator list excludes legacy mock identities", async () =
   }
 });
 
-test("three Feishu business tables expose stable online links", () => {
+test("four Feishu business tables expose stable online links", () => {
   const keys = [
     "LARK_BASE_WEB_URL",
     "LARK_LEDGER_TABLE_ID",
     "LARK_LEDGER_VIEW_ID",
+    "LARK_POOL_TABLE_ID",
+    "LARK_POOL_VIEW_ID",
+    "LARK_CORPUS_TABLE_ID",
+    "LARK_CORPUS_VIEW_ID",
     "LARK_245_TABLE_ID",
     "LARK_245_VIEW_ID",
     "LARK_GAOFENG_TABLE_ID",
@@ -339,23 +401,79 @@ test("three Feishu business tables expose stable online links", () => {
     LARK_BASE_WEB_URL: "https://example.feishu.cn/wiki/base-node",
     LARK_LEDGER_TABLE_ID: "ledger-table",
     LARK_LEDGER_VIEW_ID: "ledger-view",
-    LARK_245_TABLE_ID: "245-table",
-    LARK_245_VIEW_ID: "245-view",
+    LARK_POOL_TABLE_ID: "pool-table",
+    LARK_POOL_VIEW_ID: "pool-view",
+    LARK_CORPUS_TABLE_ID: "corpus-table",
+    LARK_CORPUS_VIEW_ID: "corpus-view",
     LARK_GAOFENG_TABLE_ID: "gaofeng-table",
     LARK_GAOFENG_VIEW_ID: "gaofeng-view"
   });
+  delete process.env.LARK_245_TABLE_ID;
+  delete process.env.LARK_245_VIEW_ID;
   try {
     const service = new LarkBaseSyncService({}, {}, {});
     const sources = service.sourceConfigurations();
-    assert.deepEqual(sources.map((source) => source.key), ["ledger", "project-245", "gaofeng"]);
+    assert.deepEqual(sources.map((source) => source.key), ["pool", "corpus", "gaofeng", "ledger"]);
     assert.equal(sources.every((source) => source.configured), true);
-    assert.equal(sources[0].url, "https://example.feishu.cn/wiki/base-node?table=ledger-table&view=ledger-view");
-    assert.equal(sources[2].url, "https://example.feishu.cn/wiki/base-node?table=gaofeng-table&view=gaofeng-view");
+    assert.equal(sources[0].url, "https://example.feishu.cn/wiki/base-node?table=pool-table&view=pool-view");
+    assert.equal(sources[3].url, "https://example.feishu.cn/wiki/base-node?table=ledger-table&view=ledger-view");
   } finally {
     for (const key of keys) {
       if (previous[key] == null) delete process.env[key];
       else process.env[key] = previous[key];
     }
+  }
+});
+
+test("the retired LARK_245_* configuration still points at 战略语料库获取表", () => {
+  const keys = ["LARK_CORPUS_TABLE_ID", "LARK_CORPUS_VIEW_ID", "LARK_245_TABLE_ID", "LARK_245_VIEW_ID"];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  delete process.env.LARK_CORPUS_TABLE_ID;
+  delete process.env.LARK_CORPUS_VIEW_ID;
+  Object.assign(process.env, { LARK_245_TABLE_ID: "legacy-table", LARK_245_VIEW_ID: "legacy-view" });
+  try {
+    // The table was renamed, not replaced. A deployment that still carries the old variable names
+    // must keep syncing the same table instead of silently falling back to the built-in default.
+    const corpus = new LarkBaseSyncService({}, {}, {}).sourceConfigurations().find((source) => source.key === "corpus");
+    assert.equal(corpus.tableId, "legacy-table");
+    assert.equal(corpus.viewId, "legacy-view");
+    assert.equal(corpus.source, "战略语料库获取表");
+  } finally {
+    for (const key of keys) {
+      if (previous[key] == null) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+});
+
+test("the Feishu share form is published only when configured with an https URL", async () => {
+  const previous = process.env.LARK_REQUEST_FORM_URL;
+  const controller = new LedgerController(
+    {},
+    { sessionCookieName: "delivery_session", verifyToken: () => null, mockLoginUsers: () => [] },
+    { isConfigured: () => true },
+    {},
+    {},
+    {},
+    {}
+  );
+  const session = async () => (await controller.me({ headers: {} })).requestFormUrl;
+  try {
+    process.env.LARK_REQUEST_FORM_URL = "https://aicarrier.feishu.cn/share/base/form/shr-test";
+    assert.equal(await session(), "https://aicarrier.feishu.cn/share/base/form/shr-test");
+
+    // The value lands in an anchor href, so anything that is not plain https must not be published.
+    process.env.LARK_REQUEST_FORM_URL = "javascript:alert(1)";
+    assert.equal(await session(), "");
+    process.env.LARK_REQUEST_FORM_URL = "not a url";
+    assert.equal(await session(), "");
+
+    // Unconfigured means the entry point disappears rather than rendering a dead link.
+    delete process.env.LARK_REQUEST_FORM_URL;
+    assert.equal(await session(), "");
+  } finally {
+    if (previous == null) delete process.env.LARK_REQUEST_FORM_URL;
+    else process.env.LARK_REQUEST_FORM_URL = previous;
   }
 });
 
@@ -380,7 +498,7 @@ test("administrator add action redirects to the primary Feishu ledger", async ()
     {
       sourceConfigurations: () => [{
         key: "ledger",
-        source: "总台账",
+        source: "数据团队总表",
         url: "https://example.feishu.cn/base/ledger",
         configured: true
       }]
@@ -398,18 +516,20 @@ test("administrator add action redirects to the primary Feishu ledger", async ()
   assert.equal(redirectedTo, "https://example.feishu.cn/base/ledger");
 });
 
-test("three Feishu business tables merge serially", async () => {
+test("four Feishu business tables merge serially, with 数据团队总表 last", async () => {
   const keys = [
     "LARK_BASE_TOKEN",
     "LARK_LEDGER_TABLE_ID",
-    "LARK_245_TABLE_ID",
+    "LARK_POOL_TABLE_ID",
+    "LARK_CORPUS_TABLE_ID",
     "LARK_GAOFENG_TABLE_ID"
   ];
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   Object.assign(process.env, {
     LARK_BASE_TOKEN: "base-token",
     LARK_LEDGER_TABLE_ID: "ledger-table",
-    LARK_245_TABLE_ID: "245-table",
+    LARK_POOL_TABLE_ID: "pool-table",
+    LARK_CORPUS_TABLE_ID: "corpus-table",
     LARK_GAOFENG_TABLE_ID: "gaofeng-table"
   });
   let stored = dataset([]);
@@ -431,9 +551,14 @@ test("three Feishu business tables merge serially", async () => {
   );
   try {
     const results = await service.syncAll("测试");
-    assert.deepEqual(reads, ["ledger-table", "245-table", "gaofeng-table"]);
-    assert.deepEqual(results.map((item) => item.source), ["总台账", "245", "高峰加入"]);
-    assert.equal(stored.records[0].fields["获取状态"], "gaofeng-table");
+    assert.deepEqual(reads, ["pool-table", "corpus-table", "gaofeng-table", "ledger-table"]);
+    assert.deepEqual(
+      results.map((item) => item.source),
+      ["数据团队需求池", "战略语料库获取表", "高峰项目获取表", "数据团队总表"]
+    );
+    // mergeFields is last-writer-wins, so the order above is what makes 数据团队总表 authoritative on
+    // delivery progress rather than whichever table happened to be read last.
+    assert.equal(stored.records[0].fields["获取状态"], "ledger-table");
   } finally {
     for (const key of keys) {
       if (previous[key] == null) delete process.env[key];
@@ -446,14 +571,16 @@ test("one inaccessible Feishu table does not block the other data sources", asyn
   const keys = [
     "LARK_BASE_TOKEN",
     "LARK_LEDGER_TABLE_ID",
-    "LARK_245_TABLE_ID",
+    "LARK_POOL_TABLE_ID",
+    "LARK_CORPUS_TABLE_ID",
     "LARK_GAOFENG_TABLE_ID"
   ];
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   Object.assign(process.env, {
     LARK_BASE_TOKEN: "base-token",
     LARK_LEDGER_TABLE_ID: "ledger-table",
-    LARK_245_TABLE_ID: "245-table",
+    LARK_POOL_TABLE_ID: "pool-table",
+    LARK_CORPUS_TABLE_ID: "corpus-table",
     LARK_GAOFENG_TABLE_ID: "gaofeng-table"
   });
   let stored = dataset([]);
@@ -474,10 +601,10 @@ test("one inaccessible Feishu table does not block the other data sources", asyn
   );
   try {
     const results = await service.syncAll("测试");
-    assert.deepEqual(results.map((item) => item.source), ["总台账", "245"]);
-    assert.equal(stored.records.length, 2);
-    assert.match(service.status().lastError, /高峰加入：not_found/);
-    assert.equal(service.status().sources.find((source) => source.source === "高峰加入").lastError, "not_found");
+    assert.deepEqual(results.map((item) => item.source), ["数据团队需求池", "战略语料库获取表", "数据团队总表"]);
+    assert.equal(stored.records.length, 3);
+    assert.match(service.status().lastError, /高峰项目获取表：not_found/);
+    assert.equal(service.status().sources.find((source) => source.source === "高峰项目获取表").lastError, "not_found");
   } finally {
     for (const key of keys) {
       if (previous[key] == null) delete process.env[key];
@@ -490,14 +617,16 @@ test("Feishu sync establishes a quiet baseline before emitting status-change eve
   const keys = [
     "LARK_BASE_TOKEN",
     "LARK_LEDGER_TABLE_ID",
-    "LARK_245_TABLE_ID",
+    "LARK_POOL_TABLE_ID",
+    "LARK_CORPUS_TABLE_ID",
     "LARK_GAOFENG_TABLE_ID"
   ];
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   Object.assign(process.env, {
     LARK_BASE_TOKEN: "base-token",
     LARK_LEDGER_TABLE_ID: "ledger-table",
-    LARK_245_TABLE_ID: "245-table",
+    LARK_POOL_TABLE_ID: "pool-table",
+    LARK_CORPUS_TABLE_ID: "corpus-table",
     LARK_GAOFENG_TABLE_ID: "gaofeng-table"
   });
   let stored = dataset([
@@ -531,7 +660,9 @@ test("Feishu sync establishes a quiet baseline before emitting status-change eve
     assert.deepEqual(statusEvents[0].payload.fields, ["获取状态"]);
     assert.equal(statusEvents[0].payload.beforeStatus, "已完结");
     assert.equal(statusEvents[0].payload.afterStatus, "验收中");
-    assert.equal(statusEvents[0].payload.source, "总台账");
+    // Four sources touched this key in the same round; the diff runs once at the end, so the record
+    // is attributed to the source that actually won the merge rather than to every source in turn.
+    assert.equal(statusEvents[0].payload.source, "数据团队总表");
   } finally {
     for (const key of keys) {
       if (previous[key] == null) delete process.env[key];
@@ -544,14 +675,16 @@ test("a table whose permission arrives late does not replay its history as statu
   const keys = [
     "LARK_BASE_TOKEN",
     "LARK_LEDGER_TABLE_ID",
-    "LARK_245_TABLE_ID",
+    "LARK_POOL_TABLE_ID",
+    "LARK_CORPUS_TABLE_ID",
     "LARK_GAOFENG_TABLE_ID"
   ];
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   Object.assign(process.env, {
     LARK_BASE_TOKEN: "base-token",
     LARK_LEDGER_TABLE_ID: "ledger-table",
-    LARK_245_TABLE_ID: "245-table",
+    LARK_POOL_TABLE_ID: "pool-table",
+    LARK_CORPUS_TABLE_ID: "corpus-table",
     LARK_GAOFENG_TABLE_ID: "gaofeng-table"
   });
   let stored = dataset([
@@ -580,12 +713,12 @@ test("a table whose permission arrives late does not replay its history as statu
     { enqueue: async (eventName, payload) => { events.push({ eventName, payload }); } }
   );
   try {
-    // 高峰加入 is not authorized yet, so only the other two tables establish a baseline.
+    // 高峰项目获取表 is not authorized yet, so only the other three tables establish a baseline.
     await service.syncAll("系统启动同步");
     const baselineAfterStart = service.status();
     assert.equal(baselineAfterStart.notificationBaselineReady, false);
-    assert.equal(baselineAfterStart.sources.find((item) => item.source === "高峰加入").notificationBaseline, false);
-    assert.equal(baselineAfterStart.sources.find((item) => item.source === "总台账").notificationBaseline, true);
+    assert.equal(baselineAfterStart.sources.find((item) => item.source === "高峰项目获取表").notificationBaseline, false);
+    assert.equal(baselineAfterStart.sources.find((item) => item.source === "数据团队总表").notificationBaseline, true);
 
     // Permission granted. Its first successful read differs from the stored ledger, but that is a
     // baseline rather than a change — announcing it would notify everyone about historical rows.
@@ -599,7 +732,7 @@ test("a table whose permission arrives late does not replay its history as statu
     await service.syncAll("系统兜底同步");
     const statusEvents = events.filter((event) => event.eventName === "record.updated");
     assert.equal(statusEvents.length, 1);
-    assert.equal(statusEvents[0].payload.source, "高峰加入");
+    assert.equal(statusEvents[0].payload.source, "高峰项目获取表");
     assert.equal(statusEvents[0].payload.beforeStatus, "已完结");
     assert.equal(statusEvents[0].payload.afterStatus, "验收中");
   } finally {
@@ -757,18 +890,18 @@ test("Feishu Base webhook validates its secret and schedules the matching table"
   const controller = new LedgerController({}, {}, {}, {}, {}, {
     scheduleTableSync: (tableId) => {
       scheduled.push(tableId);
-      return tableId === "tbl245" ? { source: "245", tableId } : null;
+      return tableId === "tblCorpus" ? { source: "战略语料库获取表", tableId } : null;
     }
   });
   try {
     const result = controller.larkBaseWebhook(
       undefined,
       "test-sync-secret",
-      { tableId: "tbl245", recordId: "rec1" }
+      { tableId: "tblCorpus", recordId: "rec1" }
     );
     assert.equal(result.accepted, true);
-    assert.equal(result.source, "245");
-    assert.deepEqual(scheduled, ["tbl245"]);
+    assert.equal(result.source, "战略语料库获取表");
+    assert.deepEqual(scheduled, ["tblCorpus"]);
   } finally {
     if (previous == null) delete process.env.LARK_BASE_WEBHOOK_SECRET;
     else process.env.LARK_BASE_WEBHOOK_SECRET = previous;
