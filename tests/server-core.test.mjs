@@ -105,6 +105,22 @@ test("Feishu Base timestamps become ledger date strings", () => {
   assert.equal(normalized["预算金额"], 1785715200000);
 });
 
+test("zero-width characters never split one status into two buckets", () => {
+  // Measured on the live Base: 采购调研中 appeared 7 times clean and 18 times with a trailing U+200B,
+  // which the stage view counted as two unrelated statuses and the client coloured as neither.
+  const normalized = normalizeBaseFieldValues({
+    "\u83b7\u53d6\u72b6\u6001": "\u91c7\u8d2d\u8c03\u7814\u4e2d\u200b",
+    "\u9879\u76ee\u540d\u79f0": "\ufeff\u8bed\u6599\u91c7\u96c6 ",
+    "\u9700\u6c42\u4eba": ["\u5f20\u4e09\u200b", "\u674e\u56db"],
+    "\u9884\u7b97\u91d1\u989d": 1024
+  });
+  assert.equal(normalized["\u83b7\u53d6\u72b6\u6001"], "\u91c7\u8d2d\u8c03\u7814\u4e2d");
+  assert.equal(normalized["\u9879\u76ee\u540d\u79f0"], "\u8bed\u6599\u91c7\u96c6");
+  assert.deepEqual(normalized["\u9700\u6c42\u4eba"], ["\u5f20\u4e09", "\u674e\u56db"]);
+  // Non-text values are handed through untouched.
+  assert.equal(normalized["\u9884\u7b97\u91d1\u989d"], 1024);
+});
+
 test("date-only Feishu fields keep their calendar day instead of shifting back one", () => {
   // Base anchors date-only fields at UTC midnight, so formatting them in Asia/Shanghai is still the
   // same day, while a real datetime has to be read in Shanghai time or it reports the previous day.
@@ -141,6 +157,34 @@ test("aliasing a dataset also republishes the field list the merge reads", () =>
   const names = aliased.fields.map((field) => field.name);
   assert.equal(names.includes("验收通过交付量(GB)"), true);
   assert.equal(aliased.records[0].fields["验收通过交付量(GB)"], "12");
+});
+
+test("待澄清项目 rows arrive with 需求澄清中 rather than an empty status", () => {
+  // The table has no status column at all, so without a default its rows land under 未设置 and
+  // vanish from every stage view.
+  const aliased = applySourceFieldAliases("clarify", {
+    "需求名称": "缅甸语视频采集",
+    "需求方": "王尔灿",
+    "需求部门": "数据部",
+    "需求类型": "内部采集"
+  });
+  assert.equal(aliased["项目名称"], "缅甸语视频采集");
+  assert.equal(aliased["需求人"], "王尔灿");
+  assert.equal(aliased["隶属部门"], "数据部");
+  // 需求类型 only ever holds 内部采集 / 外部采集 / 外部采购, which is the 获取渠道 vocabulary.
+  assert.equal(aliased["获取渠道"], "内部采集");
+  assert.equal(aliased["获取状态"], "需求澄清中");
+});
+
+test("a default never overwrites a status the record already carries", () => {
+  const aliased = applySourceFieldAliases("clarify", { "需求名称": "已在推进", "获取状态": "验收中" });
+  assert.equal(aliased["获取状态"], "验收中");
+});
+
+test("the 待澄清项目 default status also reaches the dataset field list", () => {
+  const aliased = applySourceAliasesToDataset("clarify", dataset([{ "需求名称": "待澄清一号" }]));
+  assert.equal(aliased.fields.map((field) => field.name).includes("获取状态"), true);
+  assert.equal(aliased.records[0].fields["获取状态"], "需求澄清中");
 });
 
 test("business key prioritizes task code over project name", () => {
@@ -382,11 +426,13 @@ test("OAuth-only administrator list excludes legacy mock identities", async () =
   }
 });
 
-test("four Feishu business tables expose stable online links", () => {
+test("five Feishu business tables expose stable online links", () => {
   const keys = [
     "LARK_BASE_WEB_URL",
     "LARK_LEDGER_TABLE_ID",
     "LARK_LEDGER_VIEW_ID",
+    "LARK_CLARIFY_TABLE_ID",
+    "LARK_CLARIFY_VIEW_ID",
     "LARK_POOL_TABLE_ID",
     "LARK_POOL_VIEW_ID",
     "LARK_CORPUS_TABLE_ID",
@@ -401,6 +447,8 @@ test("four Feishu business tables expose stable online links", () => {
     LARK_BASE_WEB_URL: "https://example.feishu.cn/wiki/base-node",
     LARK_LEDGER_TABLE_ID: "ledger-table",
     LARK_LEDGER_VIEW_ID: "ledger-view",
+    LARK_CLARIFY_TABLE_ID: "clarify-table",
+    LARK_CLARIFY_VIEW_ID: "clarify-view",
     LARK_POOL_TABLE_ID: "pool-table",
     LARK_POOL_VIEW_ID: "pool-view",
     LARK_CORPUS_TABLE_ID: "corpus-table",
@@ -413,10 +461,10 @@ test("four Feishu business tables expose stable online links", () => {
   try {
     const service = new LarkBaseSyncService({}, {}, {});
     const sources = service.sourceConfigurations();
-    assert.deepEqual(sources.map((source) => source.key), ["pool", "corpus", "gaofeng", "ledger"]);
+    assert.deepEqual(sources.map((source) => source.key), ["clarify", "pool", "corpus", "gaofeng", "ledger"]);
     assert.equal(sources.every((source) => source.configured), true);
-    assert.equal(sources[0].url, "https://example.feishu.cn/wiki/base-node?table=pool-table&view=pool-view");
-    assert.equal(sources[3].url, "https://example.feishu.cn/wiki/base-node?table=ledger-table&view=ledger-view");
+    assert.equal(sources[0].url, "https://example.feishu.cn/wiki/base-node?table=clarify-table&view=clarify-view");
+    assert.equal(sources[4].url, "https://example.feishu.cn/wiki/base-node?table=ledger-table&view=ledger-view");
   } finally {
     for (const key of keys) {
       if (previous[key] == null) delete process.env[key];
@@ -516,10 +564,11 @@ test("administrator add action redirects to the primary Feishu ledger", async ()
   assert.equal(redirectedTo, "https://example.feishu.cn/base/ledger");
 });
 
-test("four Feishu business tables merge serially, with 数据团队总表 last", async () => {
+test("five Feishu business tables merge serially, with 数据团队总表 last", async () => {
   const keys = [
     "LARK_BASE_TOKEN",
     "LARK_LEDGER_TABLE_ID",
+    "LARK_CLARIFY_TABLE_ID",
     "LARK_POOL_TABLE_ID",
     "LARK_CORPUS_TABLE_ID",
     "LARK_GAOFENG_TABLE_ID"
@@ -528,6 +577,7 @@ test("four Feishu business tables merge serially, with 数据团队总表 last",
   Object.assign(process.env, {
     LARK_BASE_TOKEN: "base-token",
     LARK_LEDGER_TABLE_ID: "ledger-table",
+    LARK_CLARIFY_TABLE_ID: "clarify-table",
     LARK_POOL_TABLE_ID: "pool-table",
     LARK_CORPUS_TABLE_ID: "corpus-table",
     LARK_GAOFENG_TABLE_ID: "gaofeng-table"
@@ -551,10 +601,10 @@ test("four Feishu business tables merge serially, with 数据团队总表 last",
   );
   try {
     const results = await service.syncAll("测试");
-    assert.deepEqual(reads, ["pool-table", "corpus-table", "gaofeng-table", "ledger-table"]);
+    assert.deepEqual(reads, ["clarify-table", "pool-table", "corpus-table", "gaofeng-table", "ledger-table"]);
     assert.deepEqual(
       results.map((item) => item.source),
-      ["数据团队需求池", "战略语料库获取表", "高峰项目获取表", "数据团队总表"]
+      ["待澄清项目", "数据团队需求池", "战略语料库获取表", "高峰项目获取表", "数据团队总表"]
     );
     // mergeFields is last-writer-wins, so the order above is what makes 数据团队总表 authoritative on
     // delivery progress rather than whichever table happened to be read last.
@@ -571,6 +621,7 @@ test("one inaccessible Feishu table does not block the other data sources", asyn
   const keys = [
     "LARK_BASE_TOKEN",
     "LARK_LEDGER_TABLE_ID",
+    "LARK_CLARIFY_TABLE_ID",
     "LARK_POOL_TABLE_ID",
     "LARK_CORPUS_TABLE_ID",
     "LARK_GAOFENG_TABLE_ID"
@@ -579,6 +630,7 @@ test("one inaccessible Feishu table does not block the other data sources", asyn
   Object.assign(process.env, {
     LARK_BASE_TOKEN: "base-token",
     LARK_LEDGER_TABLE_ID: "ledger-table",
+    LARK_CLARIFY_TABLE_ID: "clarify-table",
     LARK_POOL_TABLE_ID: "pool-table",
     LARK_CORPUS_TABLE_ID: "corpus-table",
     LARK_GAOFENG_TABLE_ID: "gaofeng-table"
@@ -601,8 +653,11 @@ test("one inaccessible Feishu table does not block the other data sources", asyn
   );
   try {
     const results = await service.syncAll("测试");
-    assert.deepEqual(results.map((item) => item.source), ["数据团队需求池", "战略语料库获取表", "数据团队总表"]);
-    assert.equal(stored.records.length, 3);
+    assert.deepEqual(
+      results.map((item) => item.source),
+      ["待澄清项目", "数据团队需求池", "战略语料库获取表", "数据团队总表"]
+    );
+    assert.equal(stored.records.length, 4);
     assert.match(service.status().lastError, /高峰项目获取表：not_found/);
     assert.equal(service.status().sources.find((source) => source.source === "高峰项目获取表").lastError, "not_found");
   } finally {
@@ -617,6 +672,7 @@ test("Feishu sync establishes a quiet baseline before emitting status-change eve
   const keys = [
     "LARK_BASE_TOKEN",
     "LARK_LEDGER_TABLE_ID",
+    "LARK_CLARIFY_TABLE_ID",
     "LARK_POOL_TABLE_ID",
     "LARK_CORPUS_TABLE_ID",
     "LARK_GAOFENG_TABLE_ID"
@@ -625,6 +681,7 @@ test("Feishu sync establishes a quiet baseline before emitting status-change eve
   Object.assign(process.env, {
     LARK_BASE_TOKEN: "base-token",
     LARK_LEDGER_TABLE_ID: "ledger-table",
+    LARK_CLARIFY_TABLE_ID: "clarify-table",
     LARK_POOL_TABLE_ID: "pool-table",
     LARK_CORPUS_TABLE_ID: "corpus-table",
     LARK_GAOFENG_TABLE_ID: "gaofeng-table"
@@ -660,7 +717,7 @@ test("Feishu sync establishes a quiet baseline before emitting status-change eve
     assert.deepEqual(statusEvents[0].payload.fields, ["获取状态"]);
     assert.equal(statusEvents[0].payload.beforeStatus, "已完结");
     assert.equal(statusEvents[0].payload.afterStatus, "验收中");
-    // Four sources touched this key in the same round; the diff runs once at the end, so the record
+    // Five sources touched this key in the same round; the diff runs once at the end, so the record
     // is attributed to the source that actually won the merge rather than to every source in turn.
     assert.equal(statusEvents[0].payload.source, "数据团队总表");
   } finally {
@@ -675,6 +732,7 @@ test("a table whose permission arrives late does not replay its history as statu
   const keys = [
     "LARK_BASE_TOKEN",
     "LARK_LEDGER_TABLE_ID",
+    "LARK_CLARIFY_TABLE_ID",
     "LARK_POOL_TABLE_ID",
     "LARK_CORPUS_TABLE_ID",
     "LARK_GAOFENG_TABLE_ID"
@@ -683,6 +741,7 @@ test("a table whose permission arrives late does not replay its history as statu
   Object.assign(process.env, {
     LARK_BASE_TOKEN: "base-token",
     LARK_LEDGER_TABLE_ID: "ledger-table",
+    LARK_CLARIFY_TABLE_ID: "clarify-table",
     LARK_POOL_TABLE_ID: "pool-table",
     LARK_CORPUS_TABLE_ID: "corpus-table",
     LARK_GAOFENG_TABLE_ID: "gaofeng-table"
@@ -713,7 +772,7 @@ test("a table whose permission arrives late does not replay its history as statu
     { enqueue: async (eventName, payload) => { events.push({ eventName, payload }); } }
   );
   try {
-    // 高峰项目获取表 is not authorized yet, so only the other three tables establish a baseline.
+    // 高峰项目获取表 is not authorized yet, so only the other four tables establish a baseline.
     await service.syncAll("系统启动同步");
     const baselineAfterStart = service.status();
     assert.equal(baselineAfterStart.notificationBaselineReady, false);

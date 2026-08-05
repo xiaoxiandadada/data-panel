@@ -46,6 +46,10 @@ function assertReachableWebhookUrl(value) {
 // Workflow pointing at a table the server does not recognise pushes events that get answered 400.
 const sources = [
   {
+    name: "待澄清项目",
+    tableId: process.env.LARK_CLARIFY_TABLE_ID || "tbl6an8LDTyqqdND"
+  },
+  {
     name: "数据团队需求池",
     tableId: process.env.LARK_POOL_TABLE_ID || "tblrdV8pbi1Ny9mJ"
   },

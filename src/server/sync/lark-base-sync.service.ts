@@ -141,8 +141,18 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
     // Order matters and is the design, not a coincidence. mergeFields is last-writer-wins for any
     // non-empty incoming value, so the authoritative source for a shared column has to run last.
     // 数据团队总表 owns delivery progress, so it goes last; 数据团队需求池 contributes requester identity
-    // and an intake-side 进展状态 that the 总表 is entitled to overrule.
+    // and an intake-side 进展状态 that the 总表 is entitled to overrule. 待澄清项目 goes first because it
+    // is pure triage: its 需求澄清中 default and its requester names must yield to every later table.
     return [
+      source(
+        "clarify",
+        "待澄清项目",
+        ["LARK_CLARIFY_TABLE_ID"],
+        ["LARK_CLARIFY_VIEW_ID"],
+        ["LARK_CLARIFY_URL"],
+        "tbl6an8LDTyqqdND",
+        ""
+      ),
       source(
         "pool",
         "数据团队需求池",

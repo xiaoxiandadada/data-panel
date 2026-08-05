@@ -798,6 +798,7 @@ export class LedgerController {
     if (["corpus", "245", "project-245", "项目245", "request", "requests", "战略语料库", "战略语料库获取表"].includes(normalized)) return "战略语料库获取表";
     if (["pool", "需求池", "数据团队需求池"].includes(normalized)) return "数据团队需求池";
     if (["gaofeng", "高峰", "高峰加入", "高峰项目获取表", "data-team", "team"].includes(normalized)) return "高峰项目获取表";
+    if (["clarify", "待澄清", "待澄清项目"].includes(normalized)) return "待澄清项目";
     return String(source || "数据团队总表").trim().slice(0, 40) || "数据团队总表";
   }
 

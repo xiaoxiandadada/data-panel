@@ -301,6 +301,7 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
                 <option value="corpus">战略语料库获取表</option>
                 <option value="pool">数据团队需求池</option>
                 <option value="gaofeng">高峰项目获取表</option>
+                <option value="clarify">待澄清项目</option>
               </select>
             </label>
             <label>

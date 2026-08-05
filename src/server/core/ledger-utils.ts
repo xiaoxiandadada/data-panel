@@ -102,13 +102,38 @@ function epochToLedgerDate(millis: number): string {
  * fields such as `\u7ED3\u7B97\u91D1\u989D` would be mangled into dates. The value must also be a plausible instant,
  * because `\u671F\u671B\u4EA4\u4ED8\u65E5\u671F` is a text field in the \u603B\u8868 holding values like `\u6700\u5927\u503C\uFF08\u5F85\u586B\uFF09`, and short
  * numbers such as durations must survive untouched.
+ *
+ * Every other column gets its invisible characters stripped on the way in — see
+ * `stripInvisibleCharacters` for why that matters more than it sounds.
  */
 export function normalizeBaseFieldValues(fields: Record<string, FieldValue>): Record<string, FieldValue> {
   const normalized: Record<string, FieldValue> = {};
   for (const [field, value] of Object.entries(fields || {})) {
-    normalized[field] = dateFieldPattern.test(field) ? normalizeBaseDateValue(value) : value;
+    normalized[field] = dateFieldPattern.test(field)
+      ? normalizeBaseDateValue(value)
+      : stripInvisibleCharacters(value);
   }
   return normalized;
+}
+
+// Zero-width space / non-joiner / joiner / BOM — they copy-paste into Feishu cells and are invisible
+// to whoever typed them. Written as escapes so they stay visible in this source file.
+const invisiblePattern = /[\u200B-\u200D\uFEFF]/g;
+
+/**
+ * Removes zero-width characters from incoming text. They carry no meaning but they do split a status
+ * in two: 采购调研中 and 采购调研中<U+200B> counted as separate buckets in the stage view, and the
+ * contaminated spelling matched none of the client's status colours or progress weights. `normalizeText`
+ * already strips them for key comparison, so cleaning on ingest is what makes the stored value agree
+ * with the value the rest of the code compares against.
+ */
+function stripInvisibleCharacters(value: FieldValue): FieldValue {
+  if (typeof value === "string") {
+    const cleaned = value.replace(invisiblePattern, "").trim();
+    return cleaned === value ? value : cleaned;
+  }
+  if (Array.isArray(value)) return value.map((item) => stripInvisibleCharacters(item as FieldValue)) as FieldValue;
+  return value;
 }
 
 function normalizeBaseDateValue(value: FieldValue): FieldValue {

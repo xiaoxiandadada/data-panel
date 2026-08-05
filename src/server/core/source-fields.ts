@@ -1,6 +1,6 @@
 import type { Dataset, FieldValue, LedgerRecord } from "./types.js";
 
-export type LarkSourceKey = "ledger" | "corpus" | "pool" | "gaofeng";
+export type LarkSourceKey = "ledger" | "corpus" | "pool" | "gaofeng" | "clarify";
 
 /**
  * Column-name translation from each Feishu source table into the 数据团队总表 vocabulary, which is the
@@ -43,7 +43,34 @@ const sourceFieldAliases: Record<LarkSourceKey, Array<readonly [string, string]>
     // Same concept, different brackets: 高峰 writes full-width （GB）, the ledger half-width (GB).
     // Left unaliased these stay two separate columns forever.
     ["验收通过交付量（GB）", "验收通过交付量(GB)"]
+  ],
+  clarify: [
+    // 待澄清项目 is a 7-column triage table; every one of its columns except 专项归口 has a ledger
+    // equivalent under a different name.
+    ["需求名称", "项目名称"],
+    ["需求方", "需求人"],
+    ["需求部门", "隶属部门"],
+    // Same {link, text} shape as ledger.需求文档, just scoped "对外".
+    ["需求文档（对外）", "需求文档"],
+    // Measured, not guessed: 需求类型 only ever holds 内部采集 / 外部采集 / 外部采购, which is the
+    // 获取渠道 vocabulary. It is emphatically not 作业技能标签 — that column holds 学历-本科 style tags.
+    ["需求类型", "获取渠道"]
   ]
+};
+
+/**
+ * Constants a source contributes to every one of its rows, applied only where the record has no value
+ * of its own.
+ *
+ * 待澄清项目 has no status column, because the table itself *is* the status: a requirement sitting in
+ * it is by definition still being clarified. Its 34 rows that exist in no other table would otherwise
+ * land in the ledger under 未设置 and disappear from every stage view. 需求澄清中 is the same status
+ * `demandToLedgerFields` stamps on a requirement submitted through this application, so the two intake
+ * paths stay consistent, and because 待澄清项目 syncs before the tables that own delivery progress, a
+ * real status always wins over this default.
+ */
+const sourceFieldDefaults: Partial<Record<LarkSourceKey, Array<readonly [string, FieldValue]>>> = {
+  clarify: [["获取状态", "需求澄清中"]]
 };
 
 function isEmpty(value: FieldValue): boolean {
@@ -60,11 +87,17 @@ function isEmpty(value: FieldValue): boolean {
  */
 export function applySourceFieldAliases(key: LarkSourceKey, fields: Record<string, FieldValue>): Record<string, FieldValue> {
   const aliases = sourceFieldAliases[key];
-  if (!aliases?.length) return fields;
+  const defaults = sourceFieldDefaults[key];
+  if (!aliases?.length && !defaults?.length) return fields;
   const mapped: Record<string, FieldValue> = { ...fields };
-  for (const [from, to] of aliases) {
+  for (const [from, to] of aliases || []) {
     if (isEmpty(mapped[from]) || !isEmpty(mapped[to])) continue;
     mapped[to] = mapped[from];
+  }
+  // After the aliases, so a column the source actually carries always beats the constant.
+  for (const [name, value] of defaults || []) {
+    if (!isEmpty(mapped[name])) continue;
+    mapped[name] = value;
   }
   return mapped;
 }
@@ -72,7 +105,7 @@ export function applySourceFieldAliases(key: LarkSourceKey, fields: Record<strin
 /** Dataset-level wrapper: aliases every record, then rebuilds the field list so the merge picks up
  * the canonical names as real columns. */
 export function applySourceAliasesToDataset(key: LarkSourceKey, dataset: Dataset): Dataset {
-  if (!sourceFieldAliases[key]?.length) return dataset;
+  if (!sourceFieldAliases[key]?.length && !sourceFieldDefaults[key]?.length) return dataset;
   const records: LedgerRecord[] = (dataset.records || []).map((record) => ({
     ...record,
     fields: applySourceFieldAliases(key, record.fields || {})
