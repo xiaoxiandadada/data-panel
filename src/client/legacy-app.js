@@ -48,7 +48,7 @@ const DEMAND_FORM_FIELDS = [
   { name: "需求人", type: "text", required: true, defaultCurrentUser: true, placeholder: "可填写多人，用顿号分隔，例如：张三、李四" },
   { name: "关注人", type: "text", placeholder: "可选，后续需求负责人也可以维护" },
   { name: "是否设置PM", type: "select", required: true, options: ["否", "是"] },
-  { name: "PM", type: "text", placeholder: "从飞书通讯录选择本需求的 PM", pmDependent: true },
+  { name: "PM", type: "text", placeholder: "可填写多人，用顿号分隔；每位 PM 都能看到本需求进度", pmDependent: true },
   { name: "需求类型", type: "select", multiple: true, options: ["采集", "自动采集", "采购", "标注", "其他", "245"] },
   { name: "学科", type: "select", multiple: true, options: ["数学", "物理", "化学", "材料", "生命科学", "地球科学", "全部学科", "通用数据", "医学", "其他"] },
   { name: "获取渠道", type: "select", options: ["外部采集", "内部采集", "自动采集", "外部采购", "外部标注"] },
@@ -103,7 +103,10 @@ const SEARCH_FIELDS = [
 ];
 const LONG_FIELDS = new Set(["项目备注", "需求异常原因", "阻塞项", "验收备注", "交付异常原因", "入库地址", "数据平台地址"]);
 const PERSON_FIELDS = new Set(["需求负责人", "需求人", "关注人", "PM", "部门负责人", "项目对接人", "解决方案负责人", "承接方责任人"]);
-const MULTI_PERSON_FIELDS = new Set(["需求人", "关注人"]);
+// Person columns that hold a list. PM is one of them: a requirement may name several PMs and each of
+// them independently gains access to it, so the picker has to allow multi-select rather than
+// overwriting the previous name.
+const MULTI_PERSON_FIELDS = new Set(["需求人", "关注人", "PM"]);
 const LINK_FIELDS = new Set(["需求文档", "入库地址", "数据平台地址", "交付路径"]);
 const STATUS_COLORS = {
   done: "#2f855a",
@@ -142,26 +145,18 @@ const STATUS_FALLBACK_COLORS = [
   "#65a30d",
   "#be123c"
 ];
-const STATUS_PROGRESS = {
-  "未设置": 0,
-  "需求取消": 100,
-  "取消": 100,
-  "待开始": 10,
-  "pending": 10,
-  "需求澄清中": 25,
-  "需求OA中": 35,
-  "采购调研中": 45,
-  "供应商选择中": 52,
-  "数据采购中": 58,
-  "进行中": 62,
-  "数据采集中": 68,
-  "数据标注中": 72,
-  "转语料库执行": 78,
-  "验收中": 88,
-  "待结算": 94,
-  "已完成/已有": 100,
-  "已有": 100,
-  "已完结": 100
+// Colour per stage key, so the segmented bar reads as one progression instead of a dozen unrelated
+// status colours. Kept in the client because it is presentation; the stage keys themselves come from
+// the server's model.
+const STAGE_COLORS = {
+  intake: "#94a3b8",
+  clarify: "#2563eb",
+  solution: "#7c3aed",
+  sourcing: "#0891b2",
+  production: "#4f46e5",
+  acceptance: "#ea580c",
+  settlement: "#f59e0b",
+  closed: "#16a34a"
 };
 
 let state = {
@@ -208,7 +203,11 @@ let state = {
   importPreview: null,
   importFile: null,
   efficiency: null,
-  efficiencyLoading: false
+  efficiencyLoading: false,
+  progressModel: null,
+  // Requester view layout: "cards" is the block/bar view, "table" the dense one. Persisted per
+  // browser so the choice survives the version poller reloading the dataset.
+  requesterLayout: localStorage.getItem("requesterLayout") === "table" ? "table" : "cards"
 };
 
 const el = (id) => document.getElementById(id);
@@ -330,21 +329,113 @@ function statusColor(label, index = 0) {
   return STATUS_LABEL_COLORS[normalized] || STATUS_FALLBACK_COLORS[index % STATUS_FALLBACK_COLORS.length] || STATUS_COLORS[statusGroup(normalized)];
 }
 
-function statusProgress(statusText) {
-  const label = statusLabel(statusText);
-  if (Object.hasOwn(STATUS_PROGRESS, label)) return STATUS_PROGRESS[label];
-  const group = statusGroup(label);
-  if (group === "done") return 100;
-  if (group === "risk") return 35;
-  if (group === "pending") return 15;
-  if (group === "active") return 60;
-  return 0;
+/**
+ * Progress for one requirement, preferring the number the server already computed.
+ *
+ * The server attaches `record.progress` to every record it hands the browser, and that is the value
+ * used. It has to be: the requester payload is narrowed to `publicFields`, which excludes the
+ * milestone columns the stage refinement reads — 结算金额 and 实际交付完成日期 have no business being
+ * in a requester's browser — so evaluating the model against the narrowed payload here produced a
+ * *lower* percentage than the same requirement reported through `/api/v1`.
+ *
+ * The local evaluation below is the fallback for records that arrive without it. It is driven entirely
+ * by the model fetched from `/api/progress/model`, never a hard-coded status table: this file used to
+ * carry its own status→percent map which had already drifted from the server's.
+ */
+function progressDetail(record) {
+  const model = state.progressModel;
+  const supplied = record?.progress;
+  if (supplied && typeof supplied.percent === "number") {
+    return {
+      ...supplied,
+      measured: supplied.countsTowardAverage,
+      stages: stageLadder(model, supplied.stageIndex)
+    };
+  }
+  const status = statusLabel(cell(record, "获取状态"));
+  const unmeasured = (outcome) => ({
+    percent: 0,
+    status,
+    stageKey: null,
+    stageLabel: outcome === "cancelled" ? status : "未设置",
+    stageIndex: -1,
+    outcome,
+    measured: false,
+    evidenceFilled: 0,
+    evidenceTotal: 0,
+    flags: [],
+    stages: stageLadder(model, -1)
+  });
+  if (!model || !status || status === "未设置") return unmeasured("unknown");
+  const key = normalizeText(status);
+  if ((model.cancelledStatuses || []).some((item) => normalizeText(item) === key)) return unmeasured("cancelled");
+  const index = (model.stages || []).findIndex((stage) => (stage.statuses || []).some((item) => normalizeText(item) === key));
+  if (index < 0) return unmeasured("unknown");
+
+  const stage = model.stages[index];
+  const placeholder = new RegExp(model.placeholderPattern || "^$", "i");
+  const evidence = stage.evidence || [];
+  const filled = evidence.filter((field) => {
+    const text = cell(record, field).trim();
+    return text && !placeholder.test(text);
+  }).length;
+  const flags = [];
+  if ((model.blockedStatuses || []).some((item) => normalizeText(item) === key)) flags.push("blocked");
+  if ((model.reworkStatuses || []).some((item) => normalizeText(item) === key)) flags.push("rework");
+  if (cell(record, model.blockerField || "阻塞项").trim() && !flags.includes("blocked")) flags.push("blocked");
+
+  const fraction = evidence.length ? filled / evidence.length : 0.5;
+  const effective = flags.length ? Math.min(fraction, 0.5) : fraction;
+  return {
+    percent: Math.round(stage.start + ((stage.end - stage.start) * effective)),
+    status,
+    stageKey: stage.key,
+    stageLabel: stage.label,
+    stageIndex: index,
+    outcome: stage.key === "closed" ? "delivered" : "in-progress",
+    measured: true,
+    evidenceFilled: filled,
+    evidenceTotal: evidence.length,
+    flags,
+    stages: stageLadder(model, index)
+  };
+}
+
+// Rebuilt from the model rather than sent per record: the ladder is identical for every requirement at
+// the same stage, and shipping it inline would add 55k redundant objects to an admin payload.
+function stageLadder(model, currentIndex) {
+  return (model?.stages || []).map((stage, index) => ({
+    ...stage,
+    state: index < currentIndex ? "done" : index === currentIndex ? "current" : "todo"
+  }));
+}
+
+/**
+ * Aggregate for the requester header. The denominator is deliberately not the record count: a
+ * cancelled requirement was never delivered and a requirement with an unrecognised status cannot be
+ * placed, so folding either into the mean would report a number nobody can reproduce by hand. Both
+ * are counted separately and named in the caption instead.
+ */
+function progressSummary(records) {
+  const details = records.map((record) => progressDetail(record));
+  const measured = details.filter((detail) => detail.measured);
+  return {
+    total: details.length,
+    measured: measured.length,
+    averagePercent: measured.length
+      ? Math.round(measured.reduce((sum, detail) => sum + detail.percent, 0) / measured.length)
+      : 0,
+    deliveredCount: details.filter((detail) => detail.outcome === "delivered").length,
+    inProgressCount: details.filter((detail) => detail.outcome === "in-progress").length,
+    cancelledCount: details.filter((detail) => detail.outcome === "cancelled").length,
+    unknownCount: details.filter((detail) => detail.outcome === "unknown").length,
+    blockedCount: details.filter((detail) => detail.flags.includes("blocked")).length,
+    reworkCount: details.filter((detail) => detail.flags.includes("rework")).length
+  };
 }
 
 function averageProgress(records) {
-  return records.length
-    ? Math.round(records.reduce((total, record) => total + statusProgress(cell(record, "获取状态")), 0) / records.length)
-    : 0;
+  return progressSummary(records).averagePercent;
 }
 
 function renderRequesterOptions(selectId) {
@@ -396,19 +487,27 @@ function summarize(records) {
   const risk = records.filter((record) => statusGroup(cell(record, "获取状态")) === "risk").length;
   const pending = records.filter((record) => statusGroup(cell(record, "获取状态")) === "pending").length;
   const unknown = records.filter((record) => statusGroup(cell(record, "获取状态")) === "unknown").length;
-  const avg = total ? Math.round((done / total) * 100) : 0;
-  return { total, done, active, risk, pending, unknown, avg };
+  // Stage-weighted, so this is no longer a second copy of doneRatio: the donut used to render
+  // done/total under the label 完成度 while the KPI card showed the identical figure as 完成率.
+  return { total, done, active, risk, pending, unknown, progress: progressSummary(records) };
 }
 
 function renderKpis(records) {
   const summary = summarize(records);
+  const avg = summary.progress.averagePercent;
   el("totalCount").textContent = summary.total;
   el("activeCount").textContent = summary.active;
   el("doneCount").textContent = summary.done;
   el("riskCount").textContent = summary.risk;
   el("doneRatio").textContent = `${summary.total ? Math.round((summary.done / summary.total) * 100) : 0}%`;
-  el("avgProgress").textContent = `${summary.avg}%`;
-  el("donutValue").style.strokeDashoffset = 301.59 * (1 - summary.avg / 100);
+  el("avgProgress").textContent = summary.progress.measured ? `${avg}%` : "—";
+  el("donutValue").style.strokeDashoffset = 301.59 * (1 - avg / 100);
+  const caption = el("avgProgressHint");
+  if (caption) {
+    caption.textContent = summary.progress.measured
+      ? `按交付阶段加权，统计 ${summary.progress.measured}/${summary.progress.total} 条可量化需求`
+      : "暂无可量化需求";
+  }
 }
 
 function renderLegend(records) {
@@ -905,17 +1004,46 @@ function renderStatusSelect(record, value) {
   `;
 }
 
+/**
+ * The quantified stage bar: one segment per stage, sized by its share of the 0–100 axis, so the shape
+ * of the bar itself says which stage the requirement is in. The single-fill bar it replaces could only
+ * express "somewhere along the way".
+ */
 function renderMiniProgress(record) {
-  const status = cell(record, "获取状态");
-  const progress = statusProgress(status);
-  const color = statusColor(status);
+  const detail = progressDetail(record);
+  const flagNote = detail.flags.includes("rework")
+    ? "返工中，进度已回退至生产阶段"
+    : detail.flags.includes("blocked")
+    ? "存在阻塞，进度暂不推进"
+    : "";
+  const segments = detail.stages.map((stage) => {
+    const span = Math.max(stage.end - stage.start, 1);
+    const reached = stage.state === "done"
+      ? 1
+      : stage.state === "current"
+      ? Math.min(Math.max((detail.percent - stage.start) / span, 0), 1)
+      : 0;
+    const color = STAGE_COLORS[stage.key] || "#2563eb";
+    return `
+      <span class="stage-seg ${stage.state}" style="flex:${span}" title="${escapeHtml(`${stage.label} · ${stage.start}–${stage.end}% · ${stage.description}`)}">
+        <i style="width:${Math.round(reached * 100)}%;background:${color}"></i>
+      </span>
+    `;
+  }).join("");
+  const caption = detail.measured
+    ? `${escapeHtml(detail.stageLabel)}${detail.evidenceTotal ? ` · 里程碑 ${detail.evidenceFilled}/${detail.evidenceTotal}` : ""}`
+    : detail.outcome === "cancelled" ? "需求已取消，不计入进度" : "状态未设置，无法量化";
   return `
-    <div class="mini-progress" aria-label="当前进度 ${progress}%">
+    <div class="mini-progress ${detail.measured ? "" : "unmeasured"}" aria-label="当前进度 ${detail.percent}%，阶段 ${escapeHtml(detail.stageLabel)}">
       <div class="mini-progress-top">
-        <span>${escapeHtml(statusLabel(status))}</span>
-        <strong>${progress}%</strong>
+        <span>${escapeHtml(detail.status)}</span>
+        <strong>${detail.measured ? `${detail.percent}%` : "—"}</strong>
       </div>
-      <div class="track"><div class="fill" style="width:${progress}%;background:${color}"></div></div>
+      <div class="stage-track">${segments}</div>
+      <div class="mini-progress-foot">
+        <span>${caption}</span>
+        ${flagNote ? `<em class="progress-flag">${escapeHtml(flagNote)}</em>` : ""}
+      </div>
     </div>
   `;
 }
@@ -965,18 +1093,87 @@ function renderRequesterView() {
   const description = section.querySelector(".requester-hero > div > p:not(.eyebrow)");
   const userLabel = section.querySelector(".current-user span");
   if (heading) heading.textContent = "我的需求进展";
-  if (description) description.textContent = "仅展示本人提交、负责、关注或担任 PM 的需求，系统按获取状态转换为进度条。";
+  if (description) description.textContent = "仅展示本人提交、负责、关注或担任 PM 的需求。进度按交付阶段量化，同一需求可有多位 PM，每位都能在此看到它。";
   if (userLabel) userLabel.textContent = "当前用户";
   el("requestSubmitButton").classList.remove("hidden");
   el("currentRequesterName").textContent = state.requesterName || "-";
 
   const records = state.requesterRecords;
-  const avg = averageProgress(records);
+  const summary = progressSummary(records);
   el("requesterTotal").textContent = records.length;
-  el("requesterAverage").textContent = `${avg}%`;
-  el("requesterDone").textContent = records.filter((record) => statusProgress(cell(record, "获取状态")) >= 100).length;
+  el("requesterAverage").textContent = summary.measured ? `${summary.averagePercent}%` : "—";
+  el("requesterDone").textContent = summary.deliveredCount;
+  renderRequesterOverview(summary);
+  renderRequesterLayoutToggle();
 
-  el("requesterCards").innerHTML = records.length ? records.map((record) => `
+  const target = el("requesterCards");
+  target.className = `requester-body ${state.requesterLayout}`;
+  if (!records.length) {
+    target.innerHTML = `<div class="empty">当前暂无与本人相关的需求</div>`;
+    return;
+  }
+  target.innerHTML = state.requesterLayout === "table"
+    ? renderRequesterTable(records)
+    : records.map((record) => renderRequesterCard(record)).join("");
+}
+
+/**
+ * The explanatory percentage above the list. It states its own denominator on purpose: the average
+ * counts only requirements the stage model can place, so quoting it without saying that invites the
+ * reader to divide 已完成 by 我的需求 and get a different number.
+ */
+function renderRequesterOverview(summary) {
+  const target = el("requesterOverview");
+  if (!target) return;
+  const excluded = summary.cancelledCount + summary.unknownCount;
+  const notes = [
+    `已完结 ${summary.deliveredCount}`,
+    `进行中 ${summary.inProgressCount}`,
+    summary.blockedCount ? `阻塞 ${summary.blockedCount}` : "",
+    summary.reworkCount ? `返工 ${summary.reworkCount}` : ""
+  ].filter(Boolean);
+  const caveat = excluded
+    ? `不计入平均值：${[
+        summary.cancelledCount ? `已取消 ${summary.cancelledCount}` : "",
+        summary.unknownCount ? `状态未设置 ${summary.unknownCount}` : ""
+      ].filter(Boolean).join("、")}`
+    : "全部需求均可量化";
+  const stageMarks = (state.progressModel?.stages || []).map((stage) => `
+    <span class="scale-mark" style="left:${stage.end}%" title="${escapeHtml(stage.label)}"></span>
+  `).join("");
+  target.innerHTML = `
+    <div class="overview-head">
+      <div>
+        <p class="eyebrow">整体交付进度</p>
+        <strong class="overview-percent">${summary.measured ? `${summary.averagePercent}%` : "—"}</strong>
+      </div>
+      <p class="overview-explain">
+        按 ${summary.measured} / ${summary.total} 条可量化需求的交付阶段加权平均得出，而非「已完结 ÷ 总数」。${escapeHtml(caveat)}。
+      </p>
+    </div>
+    <div class="overview-track">
+      <div class="overview-fill" style="width:${summary.measured ? summary.averagePercent : 0}%"></div>
+      ${stageMarks}
+    </div>
+    <div class="overview-notes">${notes.map((note) => `<span>${escapeHtml(note)}</span>`).join("")}</div>
+  `;
+}
+
+function renderRequesterLayoutToggle() {
+  const target = el("requesterLayoutToggle");
+  if (!target) return;
+  const modes = [
+    { key: "cards", label: "方块条" },
+    { key: "table", label: "表格" }
+  ];
+  target.innerHTML = modes.map((mode) => `
+    <button class="view-tab ${state.requesterLayout === mode.key ? "active" : ""}" type="button"
+      data-requester-layout="${mode.key}" aria-pressed="${state.requesterLayout === mode.key}">${mode.label}</button>
+  `).join("");
+}
+
+function renderRequesterCard(record) {
+  return `
     <article class="requester-card">
       <div class="record-top">
         <div>
@@ -994,7 +1191,49 @@ function renderRequesterView() {
       ${renderFollowerEditor(record)}
       ${renderSatisfactionControl(record)}
     </article>
-  `).join("") : `<div class="empty">当前暂无与本人相关的需求</div>`;
+  `;
+}
+
+/**
+ * The dense alternative to the cards. Progress collapses to a compact bar plus the stage name, which
+ * is what makes the table readable at twenty rows — the full segmented bar needs the card's width.
+ */
+function renderRequesterTable(records) {
+  const columns = REQUESTER_COLUMNS.filter((column) => column !== "项目名称" && column !== "获取状态");
+  return `
+    <div class="table-wrap">
+      <table class="requester-table">
+        <thead>
+          <tr>
+            <th>项目名称</th>
+            <th>进度</th>
+            <th>获取状态</th>
+            ${columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("")}
+          </tr>
+        </thead>
+        <tbody>
+          ${records.map((record) => {
+            const detail = progressDetail(record);
+            const color = STAGE_COLORS[detail.stageKey] || "#94a3b8";
+            return `
+              <tr>
+                <td class="cell-title">${escapeHtml(cell(record, "项目名称") || "未命名需求")}</td>
+                <td class="cell-progress">
+                  <div class="row-progress" title="${escapeHtml(detail.measured ? `${detail.stageLabel} · ${detail.percent}%` : "无法量化")}">
+                    <div class="track"><div class="fill" style="width:${detail.measured ? detail.percent : 0}%;background:${color}"></div></div>
+                    <span>${detail.measured ? `${detail.percent}%` : "—"}</span>
+                  </div>
+                  <small>${escapeHtml(detail.measured ? detail.stageLabel : detail.outcome === "cancelled" ? "已取消" : "未设置")}</small>
+                </td>
+                <td><span class="badge ${statusGroup(cell(record, "获取状态"))}">${escapeHtml(statusLabel(cell(record, "获取状态")))}</span></td>
+                ${columns.map((column) => `<td>${renderFieldValue(column, cell(record, column))}</td>`).join("")}
+              </tr>
+            `;
+          }).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
 }
 
 function renderSatisfactionControl(record) {
@@ -1002,7 +1241,9 @@ function renderSatisfactionControl(record) {
   if (score) {
     return `<div class="satisfaction-result"><b>满意度</b><span>${escapeHtml(score)} / 5 · ${escapeHtml(cell(record, "满意度评价来源") || "需求方评价")}</span></div>`;
   }
-  if (statusProgress(cell(record, "获取状态")) < 100) return "";
+  // Only a delivered requirement can be rated. Checking the outcome rather than "percent >= 100" keeps
+  // this from ever surveying a cancelled requirement, which the old flat table scored at 100%.
+  if (progressDetail(record).outcome !== "delivered") return "";
   return `
     <form class="satisfaction-form" data-satisfaction-record="${escapeHtml(record.record_id)}">
       <label><span>交付满意度</span><select name="score" required><option value="">请选择</option><option value="5">5 分</option><option value="4">4 分</option><option value="3">3 分</option><option value="2">2 分</option><option value="1">1 分</option></select></label>
@@ -1163,9 +1404,22 @@ async function loadData() {
   state.fields = data.fields || [];
   state.records = data.records || [];
   state.meta = data.meta || {};
+  await loadProgressModel();
   if (state.adminMode) await loadFieldPreferences();
   await loadRequesterBootstrap();
   renderAll();
+}
+
+// Fetched once per page: it is a definition table, not data, and it does not change between polls.
+async function loadProgressModel() {
+  if (state.progressModel) return;
+  try {
+    const result = await fetchJson("/api/progress/model");
+    state.progressModel = result.model || null;
+  } catch {
+    // Progress bars degrade to "未设置" rather than to a second, divergent copy of the status table.
+    state.progressModel = null;
+  }
 }
 
 async function loadFieldPreferences() {
@@ -1999,6 +2253,14 @@ el("adminTabs").addEventListener("click", (event) => {
   if (state.activeView === "efficiency" && !state.efficiency) {
     loadEfficiency().catch((error) => alert(error.message));
   }
+});
+el("requesterLayoutToggle").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-requester-layout]");
+  if (!button || button.dataset.requesterLayout === state.requesterLayout) return;
+  state.requesterLayout = button.dataset.requesterLayout;
+  // Survives the version poller reloading the dataset, which otherwise re-renders from defaults.
+  localStorage.setItem("requesterLayout", state.requesterLayout);
+  renderRequesterView();
 });
 el("requesterLoginButton").addEventListener("click", () => openRequesterAuthDialog("login"));
 el("requesterRegisterButton").addEventListener("click", () => openRequesterAuthDialog("register"));

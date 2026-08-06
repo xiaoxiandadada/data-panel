@@ -13,13 +13,16 @@ import {
   metricsText,
   nextRecordId,
   normalizeRecordFields,
+  normalizeNameList,
   publicDataset,
   requesterRecords,
   searchPublicRecords,
+  splitNameList,
   stringifyCell,
   uniqueRequesterNames
 } from "../core/ledger-utils.js";
 import type { AppUser, FieldValue, ImportBatch, LedgerRecord, UserRole } from "../core/types.js";
+import { attachProgress, progressModel, progressSummary } from "../core/progress.js";
 import { LedgerStoreService } from "../infra/ledger-store.service.js";
 import { QueueService } from "../infra/queue.service.js";
 import { DeliveryEfficiencyService } from "../metrics/delivery-efficiency.service.js";
@@ -48,6 +51,9 @@ export class LedgerController {
       redis: this.queue.isReady() ? "ready" : "disabled",
       larkSync: this.larkSync.isConfigured() ? "configured" : "disabled",
       larkSyncStatus: this.larkSync.status(),
+      // Surfaces how much of the ledger the stage model can actually place. `unknownCount` climbing is
+      // the signal that the Base grew a status nobody taught this model about.
+      progress: progressSummary(dataset.records || []),
       satisfactionAutoGoodDays: this.satisfaction.getGraceDays()
     };
   }
@@ -62,10 +68,10 @@ export class LedgerController {
   async data(@Req() request: Request, @Headers("x-admin-token") token?: string, @Query("mode") mode = "") {
     const dataset = await this.store.readDataset();
     const user = await this.currentUser(request);
-    if (mode === "mine") return publicDataset(dataset, user ? requesterRecords(dataset, user.name) : []);
+    if (mode === "mine") return attachProgress(publicDataset(dataset, user ? requesterRecords(dataset, user.name) : []), dataset.records);
     const admin = await this.adminUser(request, token);
-    if (admin) return projectDatasetForAdmin(dataset, admin);
-    return publicDataset(dataset, user ? requesterRecords(dataset, user.name) : []);
+    if (admin) return attachProgress(projectDatasetForAdmin(dataset, admin), dataset.records);
+    return attachProgress(publicDataset(dataset, user ? requesterRecords(dataset, user.name) : []), dataset.records);
   }
 
   // Cheap change detector for the browser: one counter instead of re-downloading the dataset.
@@ -75,6 +81,17 @@ export class LedgerController {
     return { ok: true, version: await this.store.readDataVersion() };
   }
 
+  /**
+   * The stage ladder and its status vocabulary. Unauthenticated because it is a definition table with
+   * no record data in it, and the browser needs it before it can draw a single progress bar. Serving
+   * it instead of shipping a copy in the bundle is what keeps the client from re-growing its own
+   * status→percent table, which had already drifted from the server's.
+   */
+  @Get("api/progress/model")
+  progressModel() {
+    return { ok: true, model: progressModel() };
+  }
+
   @Get("api/search")
   async search(@Req() request: Request, @Query("q") q = "", @Query("limit") limit = "100") {
     const user = await this.requireUser(request);
@@ -82,7 +99,7 @@ export class LedgerController {
     const safeLimit = Math.min(Math.max(Number(limit || 100), 1), 200);
     const allowed = this.auth.isAdminUser(user) ? dataset.records : requesterRecords(dataset, user.name);
     const allowedIds = new Set(allowed.map((record) => record.record_id));
-    return publicDataset(dataset, searchPublicRecords(dataset, q, safeLimit).filter((record) => allowedIds.has(record.record_id)));
+    return attachProgress(publicDataset(dataset, searchPublicRecords(dataset, q, safeLimit).filter((record) => allowedIds.has(record.record_id))), dataset.records);
   }
 
   @Get("api/requesters")
@@ -135,7 +152,7 @@ export class LedgerController {
   async myRecords(@Req() request: Request) {
     const dataset = await this.store.readDataset();
     const user = await this.requireRequester(request);
-    return publicDataset(dataset, requesterRecords(dataset, user.name));
+    return attachProgress(publicDataset(dataset, requesterRecords(dataset, user.name)), dataset.records);
   }
 
   @Get("api/my-records/export")
@@ -298,7 +315,7 @@ export class LedgerController {
       note: "需求方自助提交，自动进入交付管线"
     }));
     await this.queue.enqueue("request.submitted", { recordId: record.record_id, requesterOpenId: user.openId });
-    return { ok: true, record, data: publicDataset(dataset, requesterRecords(dataset, requesterName)) };
+    return { ok: true, record, data: attachProgress(publicDataset(dataset, requesterRecords(dataset, requesterName)), dataset.records) };
   }
 
   @Patch("api/requests/:id/followers")
@@ -310,14 +327,13 @@ export class LedgerController {
     const record = dataset.records.find((item) => item.record_id === recordId);
     if (!record) throw new HttpException({ ok: false, message: "需求不存在" }, HttpStatus.NOT_FOUND);
     const owners = ["需求负责人", "项目对接人"]
-      .flatMap((field) => stringifyCell(record.fields[field]).split(/[、,，;；/\n]+/))
-      .map((name) => name.trim().toLowerCase())
-      .filter(Boolean);
+      .flatMap((field) => splitNameList(record.fields[field]))
+      .map((name) => name.toLowerCase());
     if (!owners.includes(requesterName.toLowerCase())) {
       throw new HttpException({ ok: false, message: "只有需求负责人可以维护关注人" }, HttpStatus.FORBIDDEN);
     }
     const beforeFields = { ...(record.fields || {}) };
-    record.fields = { ...record.fields, "关注人": String(payload.followers || "").trim() };
+    record.fields = { ...record.fields, "关注人": normalizeNameList(payload.followers) };
     dataset.meta = {
       ...(dataset.meta || {}),
       status: "ok",
@@ -327,7 +343,7 @@ export class LedgerController {
     await this.store.saveDataset(dataset);
     await this.store.appendFieldChangeLogs(recordId, beforeFields, { "关注人": record.fields["关注人"] }, requesterName, "requester", "需求负责人维护关注人");
     await this.queue.enqueue("followers.updated", { recordId, actorOpenId: user.openId });
-    return { ok: true, record, data: publicDataset(dataset, requesterRecords(dataset, requesterName)) };
+    return { ok: true, record, data: attachProgress(publicDataset(dataset, requesterRecords(dataset, requesterName)), dataset.records) };
   }
 
   @Post("api/requests/:id/satisfaction")
@@ -365,7 +381,7 @@ export class LedgerController {
     };
     const updated = await this.store.updateRecord(recordId, fields);
     await this.store.appendFieldChangeLogs(recordId, before, fields, user.name, "requester", "需求方提交满意度评价");
-    return { ok: true, record: updated.record, data: publicDataset(updated.dataset, requesterRecords(updated.dataset, user.name)) };
+    return { ok: true, record: updated.record, data: attachProgress(publicDataset(updated.dataset, requesterRecords(updated.dataset, user.name)), updated.dataset.records) };
   }
 
   @Get("api/records/:id/logs")
@@ -678,7 +694,7 @@ export class LedgerController {
         actorOpenId: user?.openId || ""
       });
     }
-    const projected = projectDatasetForAdmin(dataset, admin);
+    const projected = attachProgress(projectDatasetForAdmin(dataset, admin), dataset.records);
     return {
       ok: true,
       record: projected.records.find((item) => item.record_id === recordId),

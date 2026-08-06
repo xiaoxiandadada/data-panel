@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { MongoClient, type Collection, type Db, type Document } from "mongodb";
 import type { AppUser, Dataset, ImportBatch, LedgerLog, LedgerRecord, NotificationLog, UserFieldPreferences, UserRole } from "../core/types.js";
 import type { FieldValue } from "../core/types.js";
-import { ensureFields, importBusinessKey, nextRecordId, rowsToDataset, stringifyCell } from "../core/ledger-utils.js";
+import { ensureFields, importBusinessKey, nextRecordId, normalizeBaseFieldValues, rowsToDataset, stringifyCell } from "../core/ledger-utils.js";
 import { mergeAdministrativeRoles, normalizeUserRoles, primaryUserRole } from "../core/user-roles.js";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
@@ -56,22 +56,83 @@ export class LedgerStoreService implements OnModuleInit {
 
   async onModuleInit() {
     const mongoUri = this.mongoUri();
-    if (!mongoUri) return;
-    this.client = new MongoClient(mongoUri, {
-      appName: "delivery-pipeline"
-    });
-    try {
-      await this.client.connect();
-      this.db = this.client.db(process.env.MONGODB_DB || "delivery_pipeline");
-      await this.db.command({ ping: 1 });
-      await this.ensureIndexes();
-      this.mongoReady = true;
-      await this.seedIfEmpty();
-      console.log("Ledger store connected to MongoDB");
-    } catch (error) {
-      this.mongoReady = false;
-      console.warn(`MongoDB unavailable, falling back to JSON: ${(error as Error).message}`);
+    if (mongoUri) {
+      this.client = new MongoClient(mongoUri, {
+        appName: "delivery-pipeline"
+      });
+      try {
+        await this.client.connect();
+        this.db = this.client.db(process.env.MONGODB_DB || "delivery_pipeline");
+        await this.db.command({ ping: 1 });
+        await this.ensureIndexes();
+        this.mongoReady = true;
+        await this.seedIfEmpty();
+        console.log("Ledger store connected to MongoDB");
+      } catch (error) {
+        this.mongoReady = false;
+        console.warn(`MongoDB unavailable, falling back to JSON: ${(error as Error).message}`);
+      }
     }
+    await this.sanitizeStoredRecords();
+  }
+
+  /**
+   * Re-runs the ingest normalization over records that are already stored.
+   *
+   * `normalizeBaseFieldValues` cleans values on the way in, which fixes every row a later sync
+   * touches again — but a record whose source row has since been deleted from the Base, or which
+   * arrived through an Excel import that predates the normalization, is never merged again and keeps
+   * whatever it was stored with. Measured on the deployment: 254 rows still read 解决方案中<U+200B>
+   * and 1 read 待结算<U+200B>, splitting both statuses into two buckets that no progress weight or
+   * status colour matches.
+   *
+   * Idempotent by construction — it writes only records whose normalized form differs, so the second
+   * boot finds nothing to do and touches neither the data version nor `updated_at`.
+   */
+  private async sanitizeStoredRecords(): Promise<void> {
+    try {
+      const changed = this.mongoReady && this.db
+        ? await this.sanitizeMongoRecords()
+        : await this.sanitizeFileRecords();
+      if (changed) console.log(`Ledger store normalized ${changed} stored record(s)`);
+    } catch (error) {
+      // Never block boot on a maintenance pass: the data is still readable, just not yet cleaned.
+      console.warn(`Stored record normalization skipped: ${(error as Error).message}`);
+    }
+  }
+
+  private async sanitizeMongoRecords(): Promise<number> {
+    const docs = await this.ledgerRecords().find({}, { projection: { _id: 0, record_id: 1, fields: 1 } }).toArray();
+    const writes = docs.flatMap((doc) => {
+      const fields = doc.fields || {};
+      const normalized = normalizeBaseFieldValues(fields);
+      if (JSON.stringify(normalized) === JSON.stringify(fields)) return [];
+      return [{
+        updateOne: {
+          filter: { record_id: doc.record_id },
+          update: { $set: { fields: normalized, business_key: importBusinessKey(normalized), updated_at: new Date() } }
+        }
+      }];
+    });
+    if (!writes.length) return 0;
+    await this.ledgerRecords().bulkWrite(writes);
+    await this.bumpDataVersion();
+    return writes.length;
+  }
+
+  private async sanitizeFileRecords(): Promise<number> {
+    if (!existsSync(dataPath)) return 0;
+    const dataset = JSON.parse(readFileSync(dataPath, "utf8")) as Dataset;
+    let changed = 0;
+    dataset.records = (dataset.records || []).map((record) => {
+      const fields = record.fields || {};
+      const normalized = normalizeBaseFieldValues(fields);
+      if (JSON.stringify(normalized) === JSON.stringify(fields)) return record;
+      changed += 1;
+      return { ...record, fields: normalized };
+    });
+    if (changed) await this.saveDataset(dataset);
+    return changed;
   }
 
   async readDataset(): Promise<Dataset> {

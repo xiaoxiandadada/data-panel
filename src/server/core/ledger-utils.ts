@@ -65,6 +65,32 @@ export function normalizeText(value: unknown): string {
   return String(value || "").replace(/\u200B/g, "").trim().toLowerCase();
 }
 
+/**
+ * Every person column in this ledger is a list. \u9700\u6C42\u4EBA, \u5173\u6CE8\u4EBA and now PM routinely hold several
+ * names, and the separator depends on who typed them: \u987F\u53F7 from the Feishu picker, commas from Excel
+ * paste, semicolons and slashes from people typing by hand, newlines from multi-line cells.
+ *
+ * One splitter for all of them, because the two call sites had drifted apart: the visibility check
+ * split on \u3001,\uFF0C;\uFF1B/ and newline while the requester roster split on \u3001,\uFF0C only, so a PM entered as
+ * "\u5F20\u4E09;\u674E\u56DB" could open a requirement they were not offered in the requester list.
+ *
+ * Both the halfwidth and fullwidth solidus are separators: a Chinese IME produces \uFF0F by default, and
+ * "\u674E\u56DB\uFF0F\u738B\u4E94" left unsplit is one person named \u674E\u56DB\uFF0F\u738B\u4E94 who matches nobody.
+ */
+export const nameListSeparator = /[\u3001,\uFF0C;\uFF1B/\uFF0F\n]+/;
+
+export function splitNameList(value: unknown): string[] {
+  return stringifyCell(value as FieldValue)
+    .split(nameListSeparator)
+    .map((name) => name.trim())
+    .filter(Boolean);
+}
+
+/** Re-joins a person list into the one spelling the ledger stores, so later splits are stable. */
+export function normalizeNameList(value: unknown): string {
+  return [...new Set(splitNameList(value))].join("\u3001");
+}
+
 const dayMillis = 86_400_000;
 const dateFieldPattern = /\u65F6\u95F4|\u65E5\u671F|\u65F6\u671F/;
 // A window wide enough for anything this ledger records, narrow enough that quantities and
@@ -170,30 +196,20 @@ export function todayText(): string {
   });
 }
 
+/** Person columns that decide whether a requirement shows up in someone's requester view. */
+export const requesterVisibilityFields = ["需求负责人", "需求人", "关注人", "PM", "项目对接人", "部门负责人"];
+
 export function uniqueRequesterNames(dataset: Dataset): string[] {
   return [...new Set((dataset.records || [])
-    .flatMap((record) => [
-      cell(record, "需求负责人"),
-      cell(record, "需求人"),
-      cell(record, "关注人"),
-      cell(record, "PM"),
-      cell(record, "项目对接人"),
-      cell(record, "部门负责人")
-    ])
-    .filter(Boolean)
-    .flatMap((value) => value.split(/[、,，]/).map((name) => name.trim()).filter(Boolean)))]
+    .flatMap((record) => requesterVisibilityFields.flatMap((field) => splitNameList(record.fields?.[field]))))]
     .sort((a, b) => a.localeCompare(b, "zh-CN"));
 }
 
 export function requesterRecords(dataset: Dataset, requesterName: string): LedgerRecord[] {
   const normalized = normalizeText(requesterName);
   if (!normalized) return [];
-  return (dataset.records || []).filter((record) => {
-    const visibleFields = ["需求负责人", "需求人", "关注人", "PM", "项目对接人", "部门负责人"];
-    return visibleFields.some((field) => cell(record, field)
-      .split(/[、,，;；/\n]+/)
-      .some((name) => normalizeText(name) === normalized));
-  });
+  return (dataset.records || []).filter((record) => requesterVisibilityFields.some((field) =>
+    splitNameList(record.fields?.[field]).some((name) => normalizeText(name) === normalized)));
 }
 
 export function publicDataset(dataset: Dataset, records: LedgerRecord[] = []): Dataset {
@@ -331,10 +347,13 @@ export function demandToLedgerFields(payload: Record<string, unknown>, knownFiel
   const fields = (payload.fields || {}) as Record<string, FieldValue>;
   const requesterName = String(payload.requesterName || fields["需求方"] || "").trim();
   const demandOwner = String(fields["需求负责人"] || requesterName).trim();
-  const demandPeople = String(fields["需求人"] || requesterName).trim();
-  const followers = String(fields["关注人"] || "").trim();
+  const demandPeople = normalizeNameList(fields["需求人"] || requesterName);
+  const followers = normalizeNameList(fields["关注人"]);
   const needsPm = String(fields["是否设置PM"] || "").trim() === "是";
-  const pm = needsPm ? String(fields["PM"] || "").trim() : "";
+  // A requirement may name several PMs, and each of them has to be able to open it: every name here
+  // is matched independently by `requesterRecords`, so the list is stored in the one separator that
+  // `splitNameList` round-trips rather than whatever the submitter happened to type.
+  const pm = needsPm ? normalizeNameList(fields["PM"]) : "";
   const description = String(fields["需求描述"] || "").trim();
   const projectName = String(fields["245项目名称"] || fields["项目名称"] || description.slice(0, 28) || "未命名需求").trim();
   const remarkParts = [

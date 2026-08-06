@@ -1,4 +1,6 @@
 import { Module } from "@nestjs/common";
+import { ApiKeyService } from "./api/api-key.service.js";
+import { PublicApiController } from "./api/public-api.controller.js";
 import { AuthService } from "./auth/auth.service.js";
 import { LarkOAuthService } from "./auth/lark-oauth.service.js";
 import { LedgerStoreService } from "./infra/ledger-store.service.js";
@@ -10,8 +12,11 @@ import { SatisfactionService } from "./metrics/satisfaction.service.js";
 import { LarkBaseSyncService } from "./sync/lark-base-sync.service.js";
 
 @Module({
-  controllers: [LedgerController],
+  // PublicApiController first: it owns the `api/v1` prefix, and registering it ahead of the
+  // browser controller keeps that namespace from colliding with any future `api/:something` route.
+  controllers: [PublicApiController, LedgerController],
   providers: [
+    ApiKeyService,
     AuthService,
     LarkOAuthService,
     LedgerStoreService,

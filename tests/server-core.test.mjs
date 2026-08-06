@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import { mergeImportedDataset, importBusinessKey } from "../dist/server/ledger/parse-utils.js";
 import { analyzeDeliveryEfficiency } from "../dist/server/metrics/delivery-efficiency.service.js";
 import { isCompletedStatus } from "../dist/server/metrics/satisfaction.service.js";
-import { demandToLedgerFields, normalizeBaseFieldValues, requesterRecords } from "../dist/server/core/ledger-utils.js";
+import { demandToLedgerFields, normalizeBaseFieldValues, requesterRecords, splitNameList, uniqueRequesterNames } from "../dist/server/core/ledger-utils.js";
+import { attachProgress, progressDetail, progressModel, progressStages, progressSummary } from "../dist/server/core/progress.js";
 import { applySourceAliasesToDataset, applySourceFieldAliases } from "../dist/server/core/source-fields.js";
 import { projectDatasetForAdmin } from "../dist/server/core/admin-views.js";
 import { hasAdminRole, mergeAdministrativeRoles, normalizeUserRoles, primaryUserRole } from "../dist/server/core/user-roles.js";
@@ -15,6 +16,7 @@ import { AuthService } from "../dist/server/auth/auth.service.js";
 import { LarkBaseSyncService } from "../dist/server/sync/lark-base-sync.service.js";
 import { LedgerController } from "../dist/server/ledger/ledger.controller.js";
 import { LarkNotificationService } from "../dist/server/notifications/lark-notification.service.js";
+import { ApiKeyService } from "../dist/server/api/api-key.service.js";
 
 function dataset(rows) {
   const names = [...new Set(rows.flatMap((row) => Object.keys(row)))];
@@ -1213,4 +1215,246 @@ test("Feishu administrator search reports redacted user base fields", async () =
       else process.env[key] = previous[key];
     }
   }
+});
+
+test("每一个线上实际出现的获取状态都能落到某个阶段", () => {
+  // Measured on data-panel-dev 2026-08-06. The flat table this replaced covered 18 spellings and
+  // reported every one of the other 12 as exactly 60%.
+  const live = ["已完结", "验收中", "解决方案中", "需求取消", "数据采集中", "pending", "返工", "需求澄清中",
+    "历史已入库", "已有", "内采排队中", "待结算", "采购调研中", "数据标注中", "转语料库执行", "供应商选择中",
+    "标注中", "合同OA审批中", "采集中", "采购中", "已停滞", "数据采购中", "方案审批中"];
+  for (const status of live) {
+    const detail = progressDetail({ record_id: "x", fields: { "获取状态": status } });
+    const placed = detail.stageKey != null || detail.outcome === "cancelled";
+    assert.equal(placed, true, `${status} 没有落到任何阶段`);
+  }
+});
+
+test("阶段区间互不重叠且单调递增，0% 与 100% 都是专用值", () => {
+  // 0% is reserved for requirements that cannot be placed, and 100% for delivered ones only, so the
+  // ladder starts at 3 and 结算收尾 deliberately tops out at 99 — a requirement still being settled
+  // must never be able to report 100%.
+  assert.equal(progressStages[0].start, 3);
+  assert.equal(progressStages.at(-1).end, 100);
+  assert.equal(progressStages.at(-1).key, "closed");
+  for (let index = 1; index < progressStages.length; index += 1) {
+    const previous = progressStages[index - 1];
+    const current = progressStages[index];
+    assert.equal(current.start >= previous.end, true, `第 ${index} 段与上一段重叠`);
+    assert.equal(current.end >= current.start, true, `第 ${index} 段区间为负`);
+  }
+  // Only the terminal stage may reach 100.
+  for (const stage of progressStages.slice(0, -1)) {
+    assert.equal(stage.end < 100, true, `${stage.key} 的上限触达了 100%`);
+  }
+  // No status may be claimed by two stages, or the percentage would depend on iteration order.
+  const seen = new Set();
+  for (const stage of progressStages) {
+    for (const status of stage.statuses) {
+      assert.equal(seen.has(status), false, `${status} 被两个阶段同时声明`);
+      seen.add(status);
+    }
+  }
+});
+
+test("里程碑证据把同一状态的需求拉开差距", () => {
+  const at = (fields) => progressDetail({ record_id: "x", fields }).percent;
+  const none = at({ "获取状态": "数据采集中" });
+  const one = at({ "获取状态": "数据采集中", "开始执行时间": "2026/03/01" });
+  const both = at({ "获取状态": "数据采集中", "开始执行时间": "2026/03/01", "期望交付日期": "2026/09/01" });
+  assert.equal(none < one && one < both, true, `进度未随里程碑递增：${none}/${one}/${both}`);
+  assert.equal(none, 58);
+  assert.equal(both, 80);
+  // 期望交付日期 is a text column in the 总表 and really does hold this placeholder.
+  assert.equal(at({ "获取状态": "数据采集中", "开始执行时间": "2026/03/01", "期望交付日期": "最大值（待填）" }), one);
+});
+
+test("返工与阻塞不会被里程碑推到阶段顶部", () => {
+  const rework = progressDetail({ record_id: "x", fields: { "获取状态": "返工", "开始执行时间": "2026/03/01", "期望交付日期": "2026/09/01" } });
+  assert.deepEqual(rework.flags, ["rework"]);
+  // Capped at the band midpoint: without the cap this would report 80%.
+  assert.equal(rework.percent, 69);
+  const blocked = progressDetail({ record_id: "x", fields: { "获取状态": "数据采集中", "阻塞项": "供应商未交付" } });
+  assert.deepEqual(blocked.flags, ["blocked"]);
+});
+
+test("取消的需求不再算作 100%，也不进平均值", () => {
+  // The old flat table scored 需求取消 at 100, which inflated every average it appeared in.
+  const cancelled = progressDetail({ record_id: "x", fields: { "获取状态": "需求取消" } });
+  assert.equal(cancelled.percent, 0);
+  assert.equal(cancelled.outcome, "cancelled");
+  assert.equal(cancelled.countsTowardAverage, false);
+  const unknown = progressDetail({ record_id: "x", fields: { "获取状态": "" } });
+  assert.equal(unknown.outcome, "unknown");
+  assert.equal(unknown.countsTowardAverage, false);
+});
+
+test("零宽字符污染的状态仍然落在同一个阶段", () => {
+  const clean = progressDetail({ record_id: "x", fields: { "获取状态": "解决方案中" } });
+  const dirty = progressDetail({ record_id: "x", fields: { "获取状态": "解决方案中​" } });
+  assert.equal(dirty.stageKey, clean.stageKey);
+  assert.equal(dirty.percent, clean.percent);
+});
+
+test("进度汇总的分母是可量化条数，而不是总条数", () => {
+  const records = [
+    { record_id: "1", fields: { "获取状态": "已完结" } },
+    { record_id: "2", fields: { "获取状态": "已完结" } },
+    { record_id: "3", fields: { "获取状态": "需求取消" } },
+    { record_id: "4", fields: { "获取状态": "" } }
+  ];
+  const summary = progressSummary(records);
+  assert.equal(summary.total, 4);
+  assert.equal(summary.measured, 2);
+  // 100, not 50: the cancelled and the statusless row are reported separately, not averaged in as 0.
+  assert.equal(summary.averagePercent, 100);
+  assert.equal(summary.cancelledCount, 1);
+  assert.equal(summary.unknownCount, 1);
+  assert.equal(summary.measured, summary.total - summary.cancelledCount - summary.unknownCount);
+});
+
+test("阶段模型可序列化，浏览器据此复算得到同一个百分比", () => {
+  const model = progressModel();
+  const serialized = JSON.parse(JSON.stringify(model));
+  assert.deepEqual(serialized.stages.map((stage) => stage.key), progressStages.map((stage) => stage.key));
+  // The client evaluator is driven entirely by these three pieces; if any went missing it would
+  // silently fall back to "未设置" for every record.
+  assert.equal(serialized.stages.every((stage) => Array.isArray(stage.statuses) && Array.isArray(stage.evidence)), true);
+  assert.equal(typeof serialized.placeholderPattern, "string");
+  assert.deepEqual(serialized.cancelledStatuses.includes("需求取消"), true);
+});
+
+test("一个需求可以填多位 PM，每位都能看到它", () => {
+  const data = dataset([
+    { "项目名称": "多 PM 需求", "PM": "张三、李四", "需求人": "王冠楚" },
+    { "项目名称": "单 PM 需求", "PM": "赵五", "需求人": "王冠楚" }
+  ]);
+  // Both PMs of the first requirement resolve it, and neither picks up the other requirement.
+  assert.deepEqual(requesterRecords(data, "张三").map((record) => record.fields["项目名称"]), ["多 PM 需求"]);
+  assert.deepEqual(requesterRecords(data, "李四").map((record) => record.fields["项目名称"]), ["多 PM 需求"]);
+  assert.deepEqual(requesterRecords(data, "赵五").map((record) => record.fields["项目名称"]), ["单 PM 需求"]);
+  // Every PM must also appear in the requester roster, or they cannot be selected in the first place.
+  const roster = uniqueRequesterNames(data);
+  for (const name of ["张三", "李四", "赵五"]) assert.equal(roster.includes(name), true, `${name} 不在需求方名单里`);
+});
+
+test("人名列表的分隔符在可见性判定和名单里保持一致", () => {
+  // These two used to disagree: visibility split on 、,，;；/ and newline, the roster only on 、,，, so a
+  // PM entered with a semicolon could open a requirement they were never offered.
+  const data = dataset([{ "项目名称": "分隔符混用", "PM": "张三;李四／王五", "关注人": "赵六\n钱七" }]);
+  assert.deepEqual(splitNameList("张三;李四"), ["张三", "李四"]);
+  const roster = uniqueRequesterNames(data);
+  for (const name of ["张三", "李四", "赵六", "钱七"]) {
+    assert.equal(roster.includes(name), true, `${name} 不在名单里`);
+    assert.equal(requesterRecords(data, name).length, 1, `${name} 看不到这条需求`);
+  }
+});
+
+test("提交需求时多位 PM 被规范化成同一种分隔符", () => {
+  const fields = demandToLedgerFields(
+    { requesterName: "王冠楚", fields: { "需求描述": "多 PM", "是否设置PM": "是", "PM": "张三;李四、张三" } },
+    [{ id: "PM", name: "PM" }, { id: "需求人", name: "需求人" }]
+  );
+  // Deduplicated and re-joined, so the value round-trips through splitNameList unchanged.
+  assert.equal(fields["PM"], "张三、李四");
+  const notNeeded = demandToLedgerFields(
+    { requesterName: "王冠楚", fields: { "需求描述": "无 PM", "是否设置PM": "否", "PM": "张三" } },
+    [{ id: "PM", name: "PM" }]
+  );
+  assert.equal(notNeeded["PM"], "");
+});
+
+function apiWithKeys(keys, callback) {
+  const previous = process.env.PUBLIC_API_KEYS;
+  if (keys == null) delete process.env.PUBLIC_API_KEYS;
+  else process.env.PUBLIC_API_KEYS = keys;
+  try {
+    // ApiKeyService reads the environment in its field initialisers, so it has to be built per case.
+    return callback(new ApiKeyService());
+  } finally {
+    if (previous == null) delete process.env.PUBLIC_API_KEYS;
+    else process.env.PUBLIC_API_KEYS = previous;
+  }
+}
+
+test("未配置 PUBLIC_API_KEYS 时对外 API 关闭，而不是开放", () => {
+  // The single most important property here: this surface serves the whole ledger, so an
+  // unconfigured deployment must publish nothing rather than everything.
+  apiWithKeys(null, (service) => {
+    assert.equal(service.isConfigured(), false);
+    assert.equal(service.resolve("anything"), null);
+  });
+  apiWithKeys("", (service) => assert.equal(service.isConfigured(), false));
+});
+
+test("API Key 支持 name:key 与裸 key 两种写法", () => {
+  apiWithKeys("bi-team:key-abc-123,key-bare-456", (service) => {
+    assert.equal(service.clientCount(), 2);
+    assert.equal(service.resolve("key-abc-123")?.name, "bi-team");
+    // A bare key still gets a stable name so the rate limiter has something to key on.
+    assert.equal(service.resolve("key-bare-456")?.name, "client-2");
+    assert.equal(service.resolve("key-abc"), null);
+    assert.equal(service.resolve(""), null);
+    // The client name is not a credential and must never authenticate on its own.
+    assert.equal(service.resolve("bi-team"), null);
+  });
+});
+
+test("限流按客户端独立计数并在窗口内耗尽", () => {
+  const previousLimit = process.env.PUBLIC_API_RATE_LIMIT;
+  process.env.PUBLIC_API_RATE_LIMIT = "2";
+  try {
+    apiWithKeys("a:key-a,b:key-b", (service) => {
+      assert.equal(service.consume("a").allowed, true);
+      assert.equal(service.consume("a").allowed, true);
+      assert.equal(service.consume("a").allowed, false);
+      // One client exhausting its budget must not spend another client's.
+      assert.equal(service.consume("b").allowed, true);
+      assert.equal(service.limits().limit, 2);
+    });
+  } finally {
+    if (previousLimit == null) delete process.env.PUBLIC_API_RATE_LIMIT;
+    else process.env.PUBLIC_API_RATE_LIMIT = previousLimit;
+  }
+});
+
+test("进度按未收窄的记录计算，不受字段投影影响", () => {
+  // The regression this guards: attachProgress used to run after publicDataset, so it evaluated the
+  // milestone columns against a payload that had already dropped them. 缅甸语视频 then read 80% in the
+  // browser and 88% through /api/v1 — two answers for one requirement.
+  const full = dataset([{
+    "项目名称": "缅甸语视频",
+    "获取状态": "验收中",
+    "需求人": "王冠楚",
+    // None of these three survive the requester projection, and all three are stage evidence.
+    "实际交付完成日期": "2026/07/01",
+    "验收通过交付量(GB)": "12",
+    "结算金额": "100000"
+  }]);
+  const authoritative = progressDetail(full.records[0]);
+  assert.equal(authoritative.evidenceFilled, 2);
+  assert.equal(authoritative.evidenceTotal, 3);
+  assert.equal(authoritative.percent, 88);
+
+  // Simulate the projection: same record_id, evidence columns gone.
+  const narrowed = { records: [{ record_id: full.records[0].record_id, fields: { "项目名称": "缅甸语视频", "获取状态": "验收中" } }] };
+  const attached = attachProgress(narrowed, full.records);
+  assert.equal(attached.records[0].progress.percent, 88);
+  assert.equal(attached.records[0].progress.evidenceFilled, 2);
+  // The narrowed fields themselves are untouched — nothing the recipient may not see gets added back.
+  assert.equal("结算金额" in attached.records[0].fields, false);
+  assert.equal("实际交付完成日期" in attached.records[0].fields, false);
+
+  // Without the source records it can only see the narrowed payload, which is the old wrong answer.
+  assert.equal(attachProgress(narrowed).records[0].progress.percent, 80);
+});
+
+test("附加的进度块不携带逐条重复的阶段梯", () => {
+  // 6974 records × 8 stage objects would be 55k redundant objects in one admin payload; the client
+  // rebuilds the ladder from stageIndex plus the model it already fetched.
+  const attached = attachProgress(dataset([{ "项目名称": "任意", "获取状态": "验收中" }]));
+  const progress = attached.records[0].progress;
+  assert.equal("stages" in progress, false);
+  assert.equal(progress.stageCount, progressStages.length);
+  assert.equal(progress.stageIndex >= 0, true);
 });

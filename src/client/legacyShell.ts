@@ -144,7 +144,12 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
             <strong id="requesterDone">0</strong>
           </article>
         </div>
-        <div id="requesterCards" class="requester-cards"></div>
+        <div id="requesterOverview" class="requester-overview"></div>
+        <div class="requester-toolbar">
+          <span class="toolbar-label">展示方式</span>
+          <nav id="requesterLayoutToggle" class="view-tabs compact" aria-label="需求展示方式"></nav>
+        </div>
+        <div id="requesterCards" class="requester-body cards"></div>
       </section>
 
       <section id="kpiSection" class="kpi-grid hidden" aria-label="项目概览">
@@ -176,6 +181,7 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
             <h2>完成度</h2>
             <span id="avgProgress">0%</span>
           </div>
+          <p id="avgProgressHint" class="panel-hint"></p>
           <div class="progress-wrap">
             <svg class="donut" viewBox="0 0 120 120" role="img" aria-label="平均完成度">
               <circle class="donut-bg" cx="60" cy="60" r="48"></circle>

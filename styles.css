@@ -824,11 +824,116 @@ body.admin-mode .admin-command-bar.admin-only {
   line-height: 1.45;
 }
 
-.requester-cards {
+.requester-cards,
+.requester-body.cards {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   margin-top: 14px;
+}
+
+.requester-body.table {
+  display: block;
+  margin-top: 14px;
+}
+
+/* 整体交付进度：口径说明必须和数字同屏，否则读者会自己去用「已完结 ÷ 总数」复算 */
+.requester-overview {
+  margin-top: 18px;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfd;
+}
+
+.overview-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.overview-percent {
+  display: block;
+  margin-top: 6px;
+  font-size: 34px;
+  line-height: 1;
+}
+
+.overview-explain {
+  flex: 1 1 320px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.overview-track {
+  position: relative;
+  height: 10px;
+  margin-top: 14px;
+  border-radius: 999px;
+  background: #e6ebf0;
+  overflow: hidden;
+}
+
+.overview-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #2563eb, #16a34a);
+  transition: width 0.3s ease;
+}
+
+/* Stage boundaries, so the bar reads as a ladder rather than a bare ratio. */
+.scale-mark {
+  position: absolute;
+  top: 0;
+  width: 1px;
+  height: 100%;
+  background: rgba(255, 255, 255, 0.75);
+}
+
+.overview-notes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.panel-hint {
+  margin: -4px 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.requester-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-top: 16px;
+}
+
+.toolbar-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.view-tabs.compact {
+  margin: 0;
+  padding: 4px;
+  gap: 4px;
+}
+
+.view-tabs.compact .view-tab {
+  min-height: 30px;
+  padding: 0 12px;
+  font-size: 13px;
 }
 
 .requester-card {
@@ -853,12 +958,122 @@ body.admin-mode .admin-command-bar.admin-only {
   margin-top: 16px;
 }
 
+.mini-progress.unmeasured {
+  opacity: 0.7;
+}
+
 .mini-progress-top {
   display: flex;
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 8px;
   color: var(--muted);
+}
+
+/* 分段进度条：每段宽度按该阶段占 0–100 轴的比例，条形本身就说明处在哪个阶段 */
+.stage-track {
+  display: flex;
+  gap: 2px;
+  height: 10px;
+}
+
+.stage-seg {
+  position: relative;
+  border-radius: 2px;
+  background: #e6ebf0;
+  overflow: hidden;
+}
+
+.stage-seg i {
+  display: block;
+  height: 100%;
+  transition: width 0.3s ease;
+}
+
+.stage-seg.current {
+  outline: 1px solid rgba(37, 99, 235, 0.45);
+  outline-offset: 1px;
+}
+
+.mini-progress-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  justify-content: space-between;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.progress-flag {
+  color: #c2410c;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.requester-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.requester-table th,
+.requester-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.requester-table th {
+  position: sticky;
+  top: 0;
+  background: #fbfcfd;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.requester-table .cell-title {
+  min-width: 200px;
+  font-weight: 700;
+}
+
+.requester-table .cell-progress {
+  min-width: 150px;
+}
+
+.row-progress {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.row-progress .track {
+  flex: 1;
+  min-width: 60px;
+  height: 6px;
+  border-radius: 999px;
+  background: #e6ebf0;
+  overflow: hidden;
+}
+
+.row-progress .fill {
+  height: 100%;
+  border-radius: 999px;
+}
+
+.row-progress span {
+  min-width: 34px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.cell-progress small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .requester-card-grid {
@@ -2493,6 +2708,7 @@ select {
   .timeline,
   .filter-grid,
   .requester-cards,
+  .requester-body.cards,
   .requester-summary,
   .analytics-cards,
   .detail-content {
@@ -2565,6 +2781,7 @@ select {
   .login-actions,
   .login-card,
   .requester-cards,
+  .requester-body.cards,
   .requester-summary,
   .analytics-cards,
   .requester-card-grid,
