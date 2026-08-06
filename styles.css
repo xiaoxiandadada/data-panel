@@ -2921,3 +2921,37 @@ select {
     animation: none;
   }
 }
+
+/* API 密钥：明文只在创建的那一刻出现一次，所以要足够显眼 */
+.api-key-reveal {
+  margin: 12px 0;
+  padding: 14px 16px;
+  border: 1px solid #f2c38b;
+  border-left: 4px solid var(--warn);
+  border-radius: 8px;
+  background: #fff8eb;
+  line-height: 1.6;
+}
+
+.api-key-value {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 8px 0;
+}
+
+.api-key-value code {
+  flex: 1 1 320px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.user-management-item.revoked {
+  opacity: 0.55;
+}

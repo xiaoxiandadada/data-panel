@@ -46,6 +46,7 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
           <button id="fieldSettingsButton" class="button admin-only hidden" type="button">自定义词条</button>
           <button id="larkSourcesButton" class="button admin-only hidden" type="button">同步状态</button>
           <button id="userManagementButton" class="button admin-only hidden" type="button">管理员设置</button>
+          <button id="apiKeyButton" class="button admin-only hidden" type="button">API 密钥</button>
         </div>
         <div class="command-group command-group-primary" aria-label="数据维护">
           <button id="addRecordButton" class="button admin-only hidden" type="button" title="在飞书中打开数据团队总表">打开数据团队总表</button>
@@ -399,6 +400,33 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
           <div id="userManagementList" class="user-management-list"></div>
           <div class="dialog-actions">
             <button class="button" type="button" id="cancelUserManagement">关闭</button>
+          </div>
+        </div>
+      </dialog>
+
+      <dialog id="apiKeyDialog" class="admin-dialog wide-dialog">
+        <div>
+          <div class="dialog-head">
+            <div>
+              <h2>API 密钥</h2>
+              <p>供外部系统调用 <code>/api/v1</code>。在此创建的密钥保存在数据库里，即时生效，无需修改部署配置或重启。</p>
+            </div>
+            <button id="closeApiKeyDialog" class="icon-button" type="button" title="关闭">×</button>
+          </div>
+          <div class="user-management-toolbar">
+            <form id="apiKeyCreateForm" class="user-management-search">
+              <label>
+                <span>新建密钥</span>
+                <input id="apiKeyName" type="text" placeholder="调用方名称，例如 bi-team" autocomplete="off" required />
+              </label>
+              <button class="button primary" type="submit">创建</button>
+            </form>
+            <span id="apiKeySummary" class="muted-label">0 个密钥</span>
+          </div>
+          <div id="apiKeyReveal" class="api-key-reveal hidden"></div>
+          <div id="apiKeyList" class="user-management-list"></div>
+          <div class="dialog-actions">
+            <button class="button" type="button" id="cancelApiKeyDialog">关闭</button>
           </div>
         </div>
       </dialog>

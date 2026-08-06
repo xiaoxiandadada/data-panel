@@ -16,7 +16,7 @@ import { AuthService } from "../dist/server/auth/auth.service.js";
 import { LarkBaseSyncService } from "../dist/server/sync/lark-base-sync.service.js";
 import { LedgerController } from "../dist/server/ledger/ledger.controller.js";
 import { LarkNotificationService } from "../dist/server/notifications/lark-notification.service.js";
-import { ApiKeyService } from "../dist/server/api/api-key.service.js";
+import { ApiKeyService, hashApiKey } from "../dist/server/api/api-key.service.js";
 
 function dataset(rows) {
   const names = [...new Set(rows.flatMap((row) => Object.keys(row)))];
@@ -1370,33 +1370,34 @@ function apiWithKeys(keys, callback) {
   else process.env.PUBLIC_API_KEYS = keys;
   try {
     // ApiKeyService reads the environment in its field initialisers, so it has to be built per case.
-    return callback(new ApiKeyService());
+    // The store stands in for the database path, which these three cases do not exercise.
+    return callback(new ApiKeyService(fakeApiKeyStore()));
   } finally {
     if (previous == null) delete process.env.PUBLIC_API_KEYS;
     else process.env.PUBLIC_API_KEYS = previous;
   }
 }
 
-test("未配置 PUBLIC_API_KEYS 时对外 API 关闭，而不是开放", () => {
+test("未配置 PUBLIC_API_KEYS 时对外 API 关闭，而不是开放", async () => {
   // The single most important property here: this surface serves the whole ledger, so an
   // unconfigured deployment must publish nothing rather than everything.
-  apiWithKeys(null, (service) => {
-    assert.equal(service.isConfigured(), false);
-    assert.equal(service.resolve("anything"), null);
+  await apiWithKeys(null, async (service) => {
+    assert.equal(await service.isConfigured(), false);
+    assert.equal(await service.resolve("anything"), null);
   });
-  apiWithKeys("", (service) => assert.equal(service.isConfigured(), false));
+  await apiWithKeys("", async (service) => assert.equal(await service.isConfigured(), false));
 });
 
-test("API Key 支持 name:key 与裸 key 两种写法", () => {
-  apiWithKeys("bi-team:key-abc-123,key-bare-456", (service) => {
+test("API Key 支持 name:key 与裸 key 两种写法", async () => {
+  await apiWithKeys("bi-team:key-abc-123,key-bare-456", async (service) => {
     assert.equal(service.clientCount(), 2);
-    assert.equal(service.resolve("key-abc-123")?.name, "bi-team");
+    assert.equal((await service.resolve("key-abc-123"))?.name, "bi-team");
     // A bare key still gets a stable name so the rate limiter has something to key on.
-    assert.equal(service.resolve("key-bare-456")?.name, "client-2");
-    assert.equal(service.resolve("key-abc"), null);
-    assert.equal(service.resolve(""), null);
+    assert.equal((await service.resolve("key-bare-456"))?.name, "client-2");
+    assert.equal(await service.resolve("key-abc"), null);
+    assert.equal(await service.resolve(""), null);
     // The client name is not a credential and must never authenticate on its own.
-    assert.equal(service.resolve("bi-team"), null);
+    assert.equal(await service.resolve("bi-team"), null);
   });
 });
 
@@ -1459,16 +1460,129 @@ test("附加的进度块不携带逐条重复的阶段梯", () => {
   assert.equal(progress.stageIndex >= 0, true);
 });
 
-test("写成 :key 的凭据不会变成一个永远匹配不上的 key", () => {
+test("写成 :key 的凭据不会变成一个永远匹配不上的 key", async () => {
   // Configuring this means editing a values.yaml in a separate GitOps repo. `:key` (name left blank)
   // used to parse into the literal credential ":key", so every `Bearer key` request 401'd while the
   // startup log still reported one client configured — a typo with no visible cause.
-  apiWithKeys(":key-no-name", (service) => {
+  await apiWithKeys(":key-no-name", async (service) => {
     assert.equal(service.clientCount(), 1);
-    assert.equal(service.resolve("key-no-name")?.name, "client-1");
+    assert.equal((await service.resolve("key-no-name"))?.name, "client-1");
   });
   // A name with no key is still dropped: there is no credential to compare against.
-  apiWithKeys("only-a-name:", (service) => assert.equal(service.clientCount(), 0));
+  await apiWithKeys("only-a-name:", (service) => assert.equal(service.clientCount(), 0));
   // A colon inside the key is fine — only the first one separates.
-  apiWithKeys("bi:aa:bb:cc", (service) => assert.equal(service.resolve("aa:bb:cc")?.name, "bi"));
+  await apiWithKeys("bi:aa:bb:cc", async (service) => assert.equal((await service.resolve("aa:bb:cc"))?.name, "bi"));
+});
+
+// Minimal stand-in for LedgerStoreService: models only what ApiKeyService touches, including the
+// revoked filter and the keyHash projection the real Mongo queries perform.
+function fakeApiKeyStore() {
+  const rows = [];
+  return {
+    rows,
+    isMongoReady: () => true,
+    async createApiKey(record) {
+      if (rows.some((row) => row.keyHash === record.keyHash)) throw new Error("duplicate key hash");
+      rows.push({ ...record });
+    },
+    async listApiKeys() {
+      return rows.map(({ keyHash, ...rest }) => rest);
+    },
+    async findApiKeyByHash(keyHash) {
+      return rows.find((row) => row.keyHash === keyHash && !row.revokedAt) || null;
+    },
+    async revokeApiKey(id) {
+      const hit = rows.find((row) => row.id === id && !row.revokedAt);
+      if (!hit) return false;
+      hit.revokedAt = new Date().toISOString();
+      return true;
+    },
+    async touchApiKey(id) {
+      const hit = rows.find((row) => row.id === id);
+      if (hit) hit.lastUsedAt = new Date().toISOString();
+    }
+  };
+}
+
+function apiServiceWithStore(store, envKeys = null) {
+  const previous = process.env.PUBLIC_API_KEYS;
+  if (envKeys == null) delete process.env.PUBLIC_API_KEYS;
+  else process.env.PUBLIC_API_KEYS = envKeys;
+  try {
+    return new ApiKeyService(store);
+  } finally {
+    if (previous == null) delete process.env.PUBLIC_API_KEYS;
+    else process.env.PUBLIC_API_KEYS = previous;
+  }
+}
+
+test("数据库签发的密钥只以哈希落库，明文只返回一次", () => {
+  // This is the point of the database path: adding a caller must not require write access to the
+  // GitOps repository, and a database dump must not yield a working credential.
+  const store = fakeApiKeyStore();
+  const service = apiServiceWithStore(store);
+  return service.issue("bi-team", "超级管理员").then(async ({ record, key }) => {
+    assert.equal(/^[0-9a-f]{64}$/.test(key), true, "签发的密钥应是 64 位十六进制");
+    // No comma, so the value is still safe if someone later pastes it into PUBLIC_API_KEYS.
+    assert.equal(key.includes(","), false);
+    assert.equal(record.keyHash, hashApiKey(key));
+    assert.notEqual(record.keyHash, key);
+    // The stored row holds the digest and nothing resembling the plaintext.
+    assert.equal(store.rows[0].keyHash, hashApiKey(key));
+    assert.equal(JSON.stringify(store.rows[0]).includes(key), false);
+    // And the admin listing never carries the digest either.
+    const listed = await service.list();
+    assert.equal("keyHash" in listed[0], false);
+    assert.equal(listed[0].name, "bi-team");
+    assert.equal(listed[0].createdBy, "超级管理员");
+  });
+});
+
+test("数据库密钥可用于鉴权，吊销后立即失效", async () => {
+  const store = fakeApiKeyStore();
+  const service = apiServiceWithStore(store);
+  assert.equal(await service.isConfigured(), false, "没有任何密钥时必须报未启用");
+  const { record, key } = await service.issue("ops-bot", "超级管理员");
+  assert.equal(await service.isConfigured(), true, "新建密钥应立即生效，无需重启");
+  const resolved = await service.resolve(key);
+  assert.equal(resolved?.name, "ops-bot");
+  assert.equal(resolved?.source, "database");
+  // Using it stamps last-used, which is what makes an unused stale key identifiable.
+  assert.equal(Boolean(store.rows[0].lastUsedAt), true);
+  assert.equal(await service.resolve(`${key}x`), null);
+  assert.equal(await service.revoke(record.id), true);
+  assert.equal(await service.resolve(key), null, "吊销后必须立即拒绝");
+  assert.equal(await service.revoke(record.id), false, "重复吊销应返回 false");
+  assert.equal(await service.isConfigured(), false);
+});
+
+test("环境变量密钥优先于数据库，且两者可并存", async () => {
+  const store = fakeApiKeyStore();
+  const service = apiServiceWithStore(store, "env-client:env-key-value");
+  const { key } = await service.issue("db-client", "超级管理员");
+  const fromEnv = await service.resolve("env-key-value");
+  assert.equal(fromEnv?.name, "env-client");
+  assert.equal(fromEnv?.source, "env");
+  const fromDb = await service.resolve(key);
+  assert.equal(fromDb?.name, "db-client");
+  assert.equal(fromDb?.source, "database");
+  // Rate limiting buckets on the client name, so the two are accounted separately.
+  assert.notEqual(fromEnv?.name, fromDb?.name);
+});
+
+test("同一个密钥不会被注册两次", async () => {
+  // Unique index on keyHash in Mongo; without it, revoking one registration would leave the other
+  // working and the credential would appear revoked while still being accepted.
+  const store = fakeApiKeyStore();
+  const service = apiServiceWithStore(store);
+  const { record } = await service.issue("first", "超级管理员");
+  await assert.rejects(() => store.createApiKey({ ...record, id: "different-id" }), /duplicate key hash/);
+});
+
+test("hashApiKey 是稳定的 SHA-256", () => {
+  // Pinned so a future change to the digest cannot silently invalidate every stored credential.
+  assert.equal(hashApiKey("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  assert.equal(hashApiKey("abc"), hashApiKey("abc"));
+  assert.notEqual(hashApiKey("abc"), hashApiKey("abd"));
+  assert.equal(hashApiKey(""), hashApiKey(null));
 });

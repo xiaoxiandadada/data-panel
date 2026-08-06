@@ -85,6 +85,23 @@ export interface NotificationLog {
   createdAt: string;
 }
 
+/**
+ * One credential for the outward-facing `/api/v1`.
+ *
+ * `keyHash` is a SHA-256 digest, never the key itself: a database dump, a log of a slow query, or a
+ * screenshot of the admin table must not hand anyone a working credential. The plaintext exists only
+ * in the response to the create call, once.
+ */
+export interface ApiKeyRecord {
+  id: string;
+  name: string;
+  keyHash: string;
+  createdAt: string;
+  createdBy: string;
+  lastUsedAt: string;
+  revokedAt: string;
+}
+
 export interface QueueEvent {
   id: string;
   eventName: string;

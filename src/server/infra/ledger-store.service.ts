@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MongoClient, type Collection, type Db, type Document } from "mongodb";
-import type { AppUser, Dataset, ImportBatch, LedgerLog, LedgerRecord, NotificationLog, UserFieldPreferences, UserRole } from "../core/types.js";
+import type { ApiKeyRecord, AppUser, Dataset, ImportBatch, LedgerLog, LedgerRecord, NotificationLog, UserFieldPreferences, UserRole } from "../core/types.js";
 import type { FieldValue } from "../core/types.js";
 import { ensureFields, importBusinessKey, nextRecordId, normalizeBaseFieldValues, rowsToDataset, stringifyCell } from "../core/ledger-utils.js";
 import { mergeAdministrativeRoles, normalizeUserRoles, primaryUserRole } from "../core/user-roles.js";
@@ -46,6 +46,7 @@ type AppUserDoc = Document & AppUser & {
 type UserFieldPreferenceDoc = Document & UserFieldPreferences;
 type ImportBatchDoc = Document & ImportBatch & { created_at: Date };
 type NotificationLogDoc = Document & NotificationLog & { created_at: Date };
+type ApiKeyDoc = Document & ApiKeyRecord & { created_at: Date };
 
 @Injectable()
 export class LedgerStoreService implements OnModuleInit {
@@ -557,6 +558,56 @@ export class LedgerStoreService implements OnModuleInit {
     writeFileSync(notificationLogPath, `${JSON.stringify([log, ...all].slice(0, 1000), null, 2)}\n`, "utf8");
   }
 
+  /**
+   * Credentials for the outward-facing `/api/v1`, stored so that adding or revoking a caller does not
+   * require editing deployment configuration.
+   *
+   * The alternative — `PUBLIC_API_KEYS` in the GitOps repository's values.yaml — needs write access to a
+   * repository most of this project's developers do not have, and every rotation costs a rolling
+   * restart. Both paths are supported; `ApiKeyService` checks the environment first and falls back here.
+   *
+   * MongoDB-only, deliberately. A JSON fallback under `data/` is a mounted volume that ends up in
+   * backups and local checkouts, which is exactly what hashing the key is meant to protect against.
+   * Without Mongo the environment variable stays the only route.
+   */
+  async createApiKey(record: ApiKeyRecord): Promise<void> {
+    if (!this.mongoReady || !this.db) throw new Error("需要 MongoDB 才能管理 API Key");
+    await this.apiKeys().insertOne({ ...record, created_at: new Date() });
+  }
+
+  async listApiKeys(): Promise<ApiKeyRecord[]> {
+    if (!this.mongoReady || !this.db) return [];
+    // keyHash is projected out: only findApiKeyByHash has any use for it, and an admin listing is
+    // exactly the kind of response that gets pasted into a chat.
+    return this.apiKeys()
+      .find({}, { projection: { _id: 0, created_at: 0, keyHash: 0 } })
+      .sort({ created_at: -1 })
+      .toArray() as unknown as Promise<ApiKeyRecord[]>;
+  }
+
+  async findApiKeyByHash(keyHash: string): Promise<ApiKeyRecord | null> {
+    if (!this.mongoReady || !this.db) return null;
+    const hit = await this.apiKeys().findOne({ keyHash, revokedAt: "" }, { projection: { _id: 0, created_at: 0 } });
+    return (hit as unknown as ApiKeyRecord) || null;
+  }
+
+  async revokeApiKey(id: string): Promise<boolean> {
+    if (!this.mongoReady || !this.db) return false;
+    // Revoked, not deleted, so "who had access and when did it stop" stays answerable.
+    const result = await this.apiKeys().updateOne({ id, revokedAt: "" }, { $set: { revokedAt: new Date().toISOString() } });
+    return result.modifiedCount > 0;
+  }
+
+  /** Best-effort last-used stamp. Telemetry, not authorization — a failure must not fail the request. */
+  async touchApiKey(id: string): Promise<void> {
+    if (!this.mongoReady || !this.db) return;
+    try {
+      await this.apiKeys().updateOne({ id }, { $set: { lastUsedAt: new Date().toISOString() } });
+    } catch {
+      // Ignored on purpose.
+    }
+  }
+
   private mongoUri(): string {
     return String(process.env.MONGODB_URI || "").trim();
   }
@@ -587,7 +638,11 @@ export class LedgerStoreService implements OnModuleInit {
       this.importBatches().createIndex({ id: 1 }, { unique: true }),
       this.importBatches().createIndex({ created_at: -1 }),
       this.notificationLogs().createIndex({ id: 1 }, { unique: true }),
-      this.notificationLogs().createIndex({ recordId: 1, created_at: -1 })
+      this.notificationLogs().createIndex({ recordId: 1, created_at: -1 }),
+      this.apiKeys().createIndex({ id: 1 }, { unique: true }),
+      // Unique on the hash: the same secret must never be registered twice under two names, or
+      // revoking one of them would leave the other working.
+      this.apiKeys().createIndex({ keyHash: 1 }, { unique: true })
     ]);
   }
 
@@ -627,5 +682,9 @@ export class LedgerStoreService implements OnModuleInit {
 
   private notificationLogs(): Collection<NotificationLogDoc> {
     return this.db!.collection<NotificationLogDoc>("notification_logs");
+  }
+
+  private apiKeys(): Collection<ApiKeyDoc> {
+    return this.db!.collection<ApiKeyDoc>("api_keys");
   }
 }

@@ -1,4 +1,4 @@
-import { Controller, Get, Headers, HttpException, HttpStatus, Param, Query, Req, Res } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Headers, HttpException, HttpStatus, Param, Post, Query, Req, Res } from "@nestjs/common";
 import type { Request, Response } from "express";
 import {
   businessKeyFields,
@@ -9,7 +9,9 @@ import {
   stringifyCell
 } from "../core/ledger-utils.js";
 import { progressDetail, progressModel, progressSummary } from "../core/progress.js";
-import type { Dataset, FieldValue, LedgerRecord } from "../core/types.js";
+import type { AppUser, Dataset, FieldValue, LedgerRecord } from "../core/types.js";
+import { isSuperAdmin } from "../core/admin-views.js";
+import { AuthService } from "../auth/auth.service.js";
 import { LedgerStoreService } from "../infra/ledger-store.service.js";
 import { ApiKeyService } from "./api-key.service.js";
 
@@ -54,8 +56,8 @@ export class PublicApiController {
 
   /** Self-describing index, so a caller can discover the surface without reading this file. */
   @Get()
-  index(@Req() request: Request, @Headers("authorization") authorization?: string, @Headers("x-api-key") apiKey?: string) {
-    this.authorize(authorization, apiKey);
+  async index(@Req() request: Request, @Headers("authorization") authorization?: string, @Headers("x-api-key") apiKey?: string) {
+    await this.authorize(authorization, apiKey);
     const { limit, windowMs } = this.apiKeys.limits();
     return {
       ok: true,
@@ -96,14 +98,14 @@ export class PublicApiController {
   }
 
   @Get("progress-stages")
-  stages(@Headers("authorization") authorization?: string, @Headers("x-api-key") apiKey?: string) {
-    this.authorize(authorization, apiKey);
+  async stages(@Headers("authorization") authorization?: string, @Headers("x-api-key") apiKey?: string) {
+    await this.authorize(authorization, apiKey);
     return { ok: true, model: progressModel() };
   }
 
   @Get("stats")
   async stats(@Headers("authorization") authorization?: string, @Headers("x-api-key") apiKey?: string) {
-    this.authorize(authorization, apiKey);
+    await this.authorize(authorization, apiKey);
     const dataset = await this.store.readDataset();
     const records = dataset.records || [];
     const statusCount: Record<string, number> = {};
@@ -127,7 +129,7 @@ export class PublicApiController {
     @Headers("authorization") authorization?: string,
     @Headers("x-api-key") apiKey?: string
   ) {
-    const client = this.authorize(authorization, apiKey);
+    const client = await this.authorize(authorization, apiKey);
     const quota = this.apiKeys.consume(client);
     response.setHeader("X-RateLimit-Remaining", String(quota.remaining));
     response.setHeader("X-RateLimit-Reset", String(Math.round(quota.resetAt / 1000)));
@@ -161,7 +163,7 @@ export class PublicApiController {
     @Headers("authorization") authorization?: string,
     @Headers("x-api-key") apiKey?: string
   ) {
-    this.authorize(authorization, apiKey);
+    await this.authorize(authorization, apiKey);
     const dataset = await this.store.readDataset();
     const record = this.findByKey(dataset, key);
     if (!record) throw new HttpException({ ok: false, message: "需求不存在" }, HttpStatus.NOT_FOUND);
@@ -260,16 +262,16 @@ export class PublicApiController {
   }
 
   /** Returns the client name so the rate limiter can attribute the call. */
-  private authorize(authorization: string | undefined, apiKey: string | undefined): string {
-    if (!this.apiKeys.isConfigured()) {
+  private async authorize(authorization: string | undefined, apiKey: string | undefined): Promise<string> {
+    if (!await this.apiKeys.isConfigured()) {
       throw new HttpException({
         ok: false,
-        message: "对外 API 尚未启用：请在部署环境配置 PUBLIC_API_KEYS 后重试",
+        message: "对外 API 尚未启用：请由超级管理员在「API 密钥」中创建一个密钥，或在部署环境配置 PUBLIC_API_KEYS",
         code: "PUBLIC_API_DISABLED"
       }, HttpStatus.NOT_IMPLEMENTED);
     }
     const bearer = /^Bearer\s+(.+)$/i.exec(String(authorization || "").trim());
-    const client = this.apiKeys.resolve(bearer ? bearer[1] : String(apiKey || ""));
+    const client = await this.apiKeys.resolve(bearer ? bearer[1] : String(apiKey || ""));
     if (!client) {
       throw new HttpException({
         ok: false,
@@ -278,5 +280,81 @@ export class PublicApiController {
       }, HttpStatus.UNAUTHORIZED);
     }
     return client.name;
+  }
+}
+
+/**
+ * Key management, for a super administrator logged into the application.
+ *
+ * Separate from `PublicApiController` because it is authenticated the opposite way round: these routes
+ * are reached with a browser session and are *not* callable with an API key, so possessing one key can
+ * never be used to mint another.
+ */
+@Controller("api/admin/api-keys")
+export class ApiKeyAdminController {
+  constructor(
+    private readonly apiKeys: ApiKeyService,
+    private readonly auth: AuthService,
+    private readonly store: LedgerStoreService
+  ) {}
+
+  @Get()
+  async list(@Req() request: Request, @Headers("x-admin-token") token?: string) {
+    await this.requireSuperAdmin(request, token);
+    return {
+      ok: true,
+      // Counted separately so the UI can explain why a key it cannot show is nonetheless working.
+      environmentKeyCount: this.apiKeys.clientCount(),
+      keys: await this.apiKeys.list()
+    };
+  }
+
+  @Post()
+  async create(@Req() request: Request, @Body() payload: { name?: string }, @Headers("x-admin-token") token?: string) {
+    const actor = await this.requireSuperAdmin(request, token);
+    if (!this.store.isMongoReady()) {
+      throw new HttpException({
+        ok: false,
+        message: "当前未连接 MongoDB，无法创建 API 密钥；请改用部署环境的 PUBLIC_API_KEYS"
+      }, HttpStatus.SERVICE_UNAVAILABLE);
+    }
+    const { record, key } = await this.apiKeys.issue(String(payload?.name || ""), actor.name);
+    return {
+      ok: true,
+      key: record,
+      // The one and only time the plaintext exists outside the caller's own notes.
+      plaintext: key,
+      message: "请立即复制并妥善保存，此密钥只显示一次，之后无法再取回"
+    };
+  }
+
+  @Delete(":id")
+  async revoke(@Req() request: Request, @Param("id") id: string, @Headers("x-admin-token") token?: string) {
+    await this.requireSuperAdmin(request, token);
+    const revoked = await this.apiKeys.revoke(id);
+    if (!revoked) throw new HttpException({ ok: false, message: "密钥不存在或已吊销" }, HttpStatus.NOT_FOUND);
+    return { ok: true };
+  }
+
+  private async requireSuperAdmin(request: Request, token: string | undefined): Promise<AppUser> {
+    const tokenUser = this.auth.verifyToken(token);
+    const sessionUser = this.auth.verifyToken(this.cookieValue(request, this.auth.sessionCookieName));
+    const candidate = [tokenUser, sessionUser].find((user) => user && this.auth.isAdminUser(user)) || null;
+    const user = candidate ? await this.store.findUserByOpenId(candidate.openId) || candidate : null;
+    if (!isSuperAdmin(user)) {
+      throw new HttpException({ ok: false, message: "需要超级管理员权限" }, HttpStatus.FORBIDDEN);
+    }
+    return user as AppUser;
+  }
+
+  private cookieValue(request: Request, name: string): string | undefined {
+    return (request.headers.cookie || "")
+      .split(";")
+      .map((part) => part.trim())
+      .map((part) => {
+        const separator = part.indexOf("=");
+        return separator >= 0 ? [part.slice(0, separator), decodeURIComponent(part.slice(separator + 1))] : [part, ""];
+      })
+      .find(([key]) => key === name)?.[1];
   }
 }

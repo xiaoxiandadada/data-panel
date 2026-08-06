@@ -1354,6 +1354,7 @@ function renderWorkspace() {
   el("fieldSettingsButton").classList.toggle("hidden", !state.adminMode);
   el("larkSourcesButton").classList.toggle("hidden", !state.adminMode);
   el("userManagementButton").classList.toggle("hidden", !state.adminMode || !superAdmin);
+  el("apiKeyButton").classList.toggle("hidden", !state.adminMode || !superAdmin);
   el("downloadMyDataButton").classList.toggle("hidden", state.authRole !== "requester");
   el("workspaceModeButton").classList.toggle(
     "hidden",
@@ -1425,6 +1426,67 @@ async function loadProgressModel() {
 async function loadFieldPreferences() {
   const result = await fetchJson("/api/preferences/fields");
   state.fieldPreferences = result.preferences || { hiddenFields: [], fieldOrder: [], pinnedFields: [] };
+}
+
+async function openApiKeys() {
+  await loadApiKeys();
+  el("apiKeyReveal").classList.add("hidden");
+  el("apiKeyDialog").showModal();
+}
+
+async function loadApiKeys() {
+  const result = await fetchJson("/api/admin/api-keys");
+  const keys = result.keys || [];
+  const active = keys.filter((key) => !key.revokedAt);
+  const envCount = Number(result.environmentKeyCount || 0);
+  el("apiKeySummary").textContent = envCount
+    // Environment keys cannot be listed or revoked from here, so say they exist rather than let the
+    // count read as "only these N keys work".
+    ? `${active.length} 个可用 · 另有 ${envCount} 个来自部署环境变量（此处不可管理）`
+    : `${active.length} 个可用`;
+  el("apiKeyList").innerHTML = keys.length ? keys.map((key) => `
+    <div class="user-management-item ${key.revokedAt ? "revoked" : ""}">
+      <div>
+        <strong>${escapeHtml(key.name)}</strong>
+        <p class="muted-label">
+          创建于 ${escapeHtml(formatApiKeyTime(key.createdAt))}${key.createdBy ? ` · ${escapeHtml(key.createdBy)}` : ""}
+          · ${key.lastUsedAt ? `最近调用 ${escapeHtml(formatApiKeyTime(key.lastUsedAt))}` : "尚未被调用"}
+        </p>
+      </div>
+      ${key.revokedAt
+        ? `<span class="muted-label">已于 ${escapeHtml(formatApiKeyTime(key.revokedAt))} 吊销</span>`
+        : `<button class="button mini" type="button" data-revoke-key="${escapeHtml(key.id)}" data-key-name="${escapeHtml(key.name)}">吊销</button>`}
+    </div>
+  `).join("") : `<div class="empty compact">还没有创建任何密钥</div>`;
+}
+
+// The only moment the plaintext is available; it is not stored and cannot be shown again.
+function revealApiKey(result) {
+  const target = el("apiKeyReveal");
+  target.classList.remove("hidden");
+  target.innerHTML = `
+    <p><b>${escapeHtml(result.key?.name || "新密钥")}</b> 已创建。${escapeHtml(result.message || "")}</p>
+    <div class="api-key-value">
+      <code id="apiKeyPlaintext">${escapeHtml(result.plaintext || "")}</code>
+      <button class="button mini" type="button" id="copyApiKey">复制</button>
+    </div>
+    <p class="muted-label">调用示例：<code>curl -H "Authorization: Bearer &lt;密钥&gt;" ${escapeHtml(location.origin)}/api/v1/requirements</code></p>
+  `;
+  el("copyApiKey").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(result.plaintext || "");
+      el("copyApiKey").textContent = "已复制";
+    } catch {
+      // Clipboard needs a secure context; the value is on screen either way.
+      el("copyApiKey").textContent = "请手动复制";
+    }
+  });
+}
+
+function formatApiKeyTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString("zh-CN", { hour12: false });
 }
 
 async function openUserManagement() {
@@ -2216,6 +2278,39 @@ el("addRecordButton").addEventListener("click", () => {
 el("fieldSettingsButton").addEventListener("click", openFieldSettings);
 el("larkSourcesButton").addEventListener("click", () => openLarkSources().catch((error) => alert(error.message)));
 el("userManagementButton").addEventListener("click", () => openUserManagement().catch((error) => alert(error.message)));
+el("apiKeyButton").addEventListener("click", () => openApiKeys().catch((error) => alert(error.message)));
+el("closeApiKeyDialog").addEventListener("click", () => el("apiKeyDialog").close());
+el("cancelApiKeyDialog").addEventListener("click", () => el("apiKeyDialog").close());
+el("apiKeyCreateForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const name = el("apiKeyName").value.trim();
+  if (!name) return;
+  try {
+    const result = await fetchJson("/api/admin/api-keys", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name })
+    });
+    el("apiKeyName").value = "";
+    revealApiKey(result);
+    await loadApiKeys();
+  } catch (error) {
+    alert(error.message);
+  }
+});
+el("apiKeyList").addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-revoke-key]");
+  if (!button) return;
+  const name = button.dataset.keyName || "该密钥";
+  // Irreversible and immediate: any caller still using it starts getting 401 on the next request.
+  if (!confirm(`吊销「${name}」？使用该密钥的调用方会立即收到 401，且无法恢复。`)) return;
+  try {
+    await fetchJson(`/api/admin/api-keys/${encodeURIComponent(button.dataset.revokeKey)}`, { method: "DELETE" });
+    await loadApiKeys();
+  } catch (error) {
+    alert(error.message);
+  }
+});
 el("downloadMyDataButton").addEventListener("click", () => {
   window.location.href = "/api/my-records/export";
 });
