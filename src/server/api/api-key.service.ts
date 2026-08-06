@@ -1,4 +1,4 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, OnModuleInit } from "@nestjs/common";
 import { timingSafeEqual } from "node:crypto";
 
 interface ApiClient {
@@ -18,11 +18,25 @@ interface ApiClient {
  * deployment silently publishing it is the one failure mode worth designing against.
  */
 @Injectable()
-export class ApiKeyService {
+export class ApiKeyService implements OnModuleInit {
   private readonly clients: ApiClient[] = parseClients(process.env.PUBLIC_API_KEYS);
   private readonly windowMs = Math.max(Number(process.env.PUBLIC_API_RATE_WINDOW_MS || 60_000), 1_000);
   private readonly limit = Math.max(Number(process.env.PUBLIC_API_RATE_LIMIT || 600), 1);
   private readonly hits = new Map<string, { count: number; resetAt: number }>();
+
+  /**
+   * States the configured surface at boot. Configuring this means editing a values.yaml in a separate
+   * GitOps repository, where a typo is invisible until someone's request 401s — so the log names the
+   * clients it parsed (names only, never the keys) to make "did my change land" answerable from logs.
+   */
+  onModuleInit() {
+    if (!this.clients.length) {
+      console.log("Public API disabled: PUBLIC_API_KEYS is empty, /api/v1 will answer 501");
+      return;
+    }
+    const names = this.clients.map((client) => client.name).join(", ");
+    console.log(`Public API enabled for ${this.clients.length} client(s): ${names} (limit ${this.limit}/${this.windowMs}ms)`);
+  }
 
   isConfigured(): boolean {
     return this.clients.length > 0;
@@ -72,7 +86,10 @@ function parseClients(raw: string | undefined): ApiClient[] {
     .map((entry, index) => {
       const separator = entry.indexOf(":");
       // A bare key is allowed; it just gets a positional name so the rate limiter can key on it.
-      if (separator <= 0) return { name: `client-${index + 1}`, key: entry };
+      // A leading colon means the operator wrote `:key` with the name left blank — strip it, or the
+      // credential would silently become ":key" and every `Bearer key` request would 401.
+      if (separator < 0) return { name: `client-${index + 1}`, key: entry };
+      if (separator === 0) return { name: `client-${index + 1}`, key: entry.slice(1).trim() };
       return { name: entry.slice(0, separator).trim() || `client-${index + 1}`, key: entry.slice(separator + 1).trim() };
     })
     .filter((client) => client.key.length > 0);

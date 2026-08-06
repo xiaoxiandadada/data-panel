@@ -4,17 +4,53 @@
 
 ## 启用
 
-```bash
-# 生成一个 key
-openssl rand -hex 32
+环境变量**不在本仓库**。`deployrc.dev.json` 指向另一个 GitOps 仓库：
 
-# 部署环境配置（逗号分隔，可配多个调用方）
-PUBLIC_API_KEYS=bi-team:<key1>,ops-bot:<key2>
-PUBLIC_API_RATE_LIMIT=600
-PUBLIC_API_RATE_WINDOW_MS=60000
+```
+gitops_api_gitlab_url : https://gitlab.shlab.tech/api/v4
+gitops_id             : 37
+yaml_path             : ack/@data-panel/@dev/+data-panel-svc/@values.yaml
 ```
 
-`name:key` 里的 `name` 不是凭据，只用于日志标注和限流分桶；也可以只写裸 key，此时自动获得 `client-1` 这样的位置名。
+`LARK_APP_SECRET`、`AUTH_SECRET`、`LARK_BASE_WEBHOOK_SECRET` 都在那个 `@values.yaml` 里，新增的三个变量也加在同一处：
+
+```yaml
+PUBLIC_API_KEYS: "bi-team:<key1>,ops-bot:<key2>"
+PUBLIC_API_RATE_LIMIT: "600"
+PUBLIC_API_RATE_WINDOW_MS: "60000"
+```
+
+生成 key：
+
+```bash
+openssl rand -hex 32
+```
+
+改完 values.yaml 后 GitOps 会滚动重启，无需改本仓库代码、也不必重新构建镜像。
+
+### 取值格式的三条硬约束
+
+1. **key 里不能有逗号。** 逗号是条目分隔符，`bi:aa,bb` 会被解析成两个调用方 `bi`（key=`aa`）和 `client-2`（key=`bb`），不报错、也不提示，你以为配了一个 32 字节的 key，实际生效的是两个短 key。`openssl rand -hex` 产出的十六进制不含逗号，照它生成就不会踩到。
+2. **`name` 可以省略但别留空冒号。** `key` 或 `name:key` 都行；`:key` 这种写法会被当作省略 name 处理（已修正为剥掉前导冒号），但语义不清楚，建议要么写全 `name:key`，要么只写 `key`。
+3. **key 里可以有冒号**，只有第一个冒号用于分隔，`bi:aa:bb:cc` 的 key 是 `aa:bb:cc`。
+
+`name` 不是凭据，单独拿 name 去请求一定 401。
+
+### 确认配置是否生效
+
+服务启动时会打一行日志，只报调用方名字，绝不打印 key：
+
+```
+Public API enabled for 2 client(s): bi-team, ops-bot (limit 600/60000ms)
+```
+
+没配时是：
+
+```
+Public API disabled: PUBLIC_API_KEYS is empty, /api/v1 will answer 501
+```
+
+因为改配置要动另一个仓库的 values.yaml，打错字在有人请求 401 之前是完全看不出来的，所以这行日志是判断「我的改动有没有生效」最快的办法。
 
 **未配置 `PUBLIC_API_KEYS` 时，`/api/v1` 下所有路由返回 501。** 这是刻意的：这个接口吐的是整份需求台账，漏配的部署应该什么都不发布，而不是全部发布。即使请求带了看起来正确的 key 也一样拒绝——因为服务端根本没有可比对的凭据。
 

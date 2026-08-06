@@ -1458,3 +1458,17 @@ test("附加的进度块不携带逐条重复的阶段梯", () => {
   assert.equal(progress.stageCount, progressStages.length);
   assert.equal(progress.stageIndex >= 0, true);
 });
+
+test("写成 :key 的凭据不会变成一个永远匹配不上的 key", () => {
+  // Configuring this means editing a values.yaml in a separate GitOps repo. `:key` (name left blank)
+  // used to parse into the literal credential ":key", so every `Bearer key` request 401'd while the
+  // startup log still reported one client configured — a typo with no visible cause.
+  apiWithKeys(":key-no-name", (service) => {
+    assert.equal(service.clientCount(), 1);
+    assert.equal(service.resolve("key-no-name")?.name, "client-1");
+  });
+  // A name with no key is still dropped: there is no credential to compare against.
+  apiWithKeys("only-a-name:", (service) => assert.equal(service.clientCount(), 0));
+  // A colon inside the key is fine — only the first one separates.
+  apiWithKeys("bi:aa:bb:cc", (service) => assert.equal(service.resolve("aa:bb:cc")?.name, "bi"));
+});
