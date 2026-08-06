@@ -7,7 +7,8 @@ stages:
 variables:
   CI_REGISTRY: docker.shlab.tech
   CI_REGISTRY_USER: cicd@1397355716557288
-  CI_REGISTRY_PASSWORD: QUE5MTAwQzEtQkEyMi00Q0QxLTg0MDYt
+  # CI_REGISTRY_PASSWORD 与 GITOPS_TOKEN 由 GitLab → Settings → CI/CD → Variables 注入
+  # （勾选 Masked 与 Protected）。不要写回本文件：本仓库有公开的 GitHub 镜像。
 
 before_script:
   - export IMAGE_REPOSITORY=${CI_PROJECT_PATH}
@@ -35,7 +36,7 @@ build:
       - /cache
   retry: 2
   script:
-    - export
+    - echo "building ${IMAGE_NAME}"
     - mkdir -p /kaniko/.docker
     - echo "{\"auths\":{\"${CI_REGISTRY}\":{\"auth\":\"$(printf "%s:%s" "${CI_REGISTRY_USER}" "${CI_REGISTRY_PASSWORD}" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
     - >-
@@ -61,8 +62,6 @@ deploy:
     - job: build
     - job: confirm_production_deployment
       optional: true
-  variables:
-    GITOPS_TOKEN: ${GITOPS_TOKEN}
   rules:
     - if: "$CI_COMMIT_REF_NAME == 'main'"
       when: on_success
@@ -72,4 +71,4 @@ deploy:
     - echo $IMAGE_NAME
     - export GIT_TAG="${CI_PROJECT_NAME}@v${IMAGE_TAG}"
     - if [ "$CI_COMMIT_REF_NAME" = "main" ]; then export APP_ENV=prod; else export APP_ENV=dev; fi
-    - DEBUG=* npm_config_registry="https://npm.shlab.tech" npx gitops-deploy -c ./deployrc.${APP_ENV}.json
+    - npm_config_registry="https://npm.shlab.tech" npx gitops-deploy -c ./deployrc.${APP_ENV}.json
