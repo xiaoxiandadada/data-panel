@@ -2986,3 +2986,23 @@ select {
 .user-management-item.revoked {
   opacity: 0.55;
 }
+
+/* 台账分页：全量渲染 6974 行会构建约 92 万个单元格，只有少渲染才治得了 DOM 体积 */
+.record-pager {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.pager-label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.record-pager .button[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

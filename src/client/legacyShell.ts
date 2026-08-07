@@ -272,6 +272,7 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
         <div id="filterGrid" class="filter-grid hidden" aria-label="字段筛选"></div>
         <div id="activeFilters" class="filter-chips hidden"></div>
         <div id="records" class="records table-wrap"></div>
+        <div id="recordPager" class="record-pager hidden" aria-label="台账分页"></div>
       </section>
 
       <dialog id="recordDialog" class="record-dialog">

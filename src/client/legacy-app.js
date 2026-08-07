@@ -207,7 +207,8 @@ let state = {
   progressModel: null,
   // Requester view layout: "cards" is the block/bar view, "table" the dense one. Persisted per
   // browser so the choice survives the version poller reloading the dataset.
-  requesterLayout: localStorage.getItem("requesterLayout") === "table" ? "table" : "cards"
+  requesterLayout: localStorage.getItem("requesterLayout") === "table" ? "table" : "cards",
+  tablePage: 1
 };
 
 const el = (id) => document.getElementById(id);
@@ -482,11 +483,11 @@ function updateNotice(meta) {
 
 function summarize(records) {
   const total = records.length;
-  const done = records.filter((record) => statusGroup(cell(record, "获取状态")) === "done").length;
-  const active = records.filter((record) => statusGroup(cell(record, "获取状态")) === "active").length;
-  const risk = records.filter((record) => statusGroup(cell(record, "获取状态")) === "risk").length;
-  const pending = records.filter((record) => statusGroup(cell(record, "获取状态")) === "pending").length;
-  const unknown = records.filter((record) => statusGroup(cell(record, "获取状态")) === "unknown").length;
+  // One pass, five counters. Five separate .filter() calls each re-derived statusGroup(cell(...)) for
+  // every record, so a 6974-record view did 34,870 status lookups where 6,974 suffice.
+  const counts = { done: 0, active: 0, risk: 0, pending: 0, unknown: 0 };
+  for (const record of records) counts[statusGroup(cell(record, "获取状态"))] += 1;
+  const { done, active, risk, pending, unknown } = counts;
   // Stage-weighted, so this is no longer a second copy of doneRatio: the donut used to render
   // done/total under the label 完成度 while the KPI card showed the identical figure as 完成率.
   return { total, done, active, risk, pending, unknown, progress: progressSummary(records) };
@@ -580,10 +581,38 @@ function renderTimeline(records) {
   `).join("") : `<div class="empty">暂无截止时间数据</div>`;
 }
 
+/**
+ * Distinct values of one column, memoized per record array.
+ *
+ * The memo is load-bearing, not a micro-optimisation. `renderStatusSelect` calls this once per row to
+ * build the inline status dropdown, and this function scans every record — so rendering 6974 rows meant
+ * 6974 full table scans, about 48.6 million `cell()` calls, measured at 15.1 of the 20.4 seconds a
+ * single admin render took. The answer is identical for every row.
+ *
+ * Keyed on the identity of `state.records`, which `loadData` replaces wholesale on every reload, so a
+ * refresh invalidates the cache for free. Inline edits that introduce a brand-new value must call
+ * `invalidateValueCache()` or the new value would be missing from the dropdown until the next reload.
+ */
+let valueCacheSource = null;
+let valueCache = new Map();
+
+function invalidateValueCache() {
+  valueCacheSource = null;
+  valueCache = new Map();
+}
+
 function uniqueValues(fieldName) {
-  return [...new Set(state.records.map((record) => cell(record, fieldName)).filter(Boolean))]
+  if (valueCacheSource !== state.records) {
+    valueCacheSource = state.records;
+    valueCache = new Map();
+  }
+  const cached = valueCache.get(fieldName);
+  if (cached) return cached;
+  const values = [...new Set(state.records.map((record) => cell(record, fieldName)).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, "zh-CN"))
     .slice(0, 200);
+  valueCache.set(fieldName, values);
+  return values;
 }
 
 function formOptions(fieldName) {
@@ -888,6 +917,7 @@ async function refreshVisitorSuggestions(query) {
 
 async function applyQuery(query) {
   state.query = query.trim();
+  state.tablePage = 1;
   state.draft = state.query;
   state.suggestionIndex = -1;
   el("projectSearchInput").value = state.query;
@@ -945,36 +975,83 @@ function renderHeaderCell(column, columns = []) {
   `;
 }
 
+const TABLE_PAGE_SIZE = 100;
+
+/**
+ * Renders one page of the ledger.
+ *
+ * Paginated because the full table is not merely slow, it is unusable: 6974 records × 133 columns built
+ * a 60 MB HTML string and roughly 927,000 `<td>` elements in a single `innerHTML` assignment. Hoisting
+ * the per-row recomputation below fixes the string-building cost, but nothing except rendering fewer
+ * rows fixes the DOM size.
+ *
+ * `recordSummary` keeps reporting the full filtered count, so the number the user sees is still the
+ * size of their result set rather than the size of the page.
+ */
 function renderTable(records) {
   const tableColumns = state.adminMode ? visibleAdminColumns() : VISITOR_COLUMNS;
-  el("recordSummary").textContent = `${records.length} 条记录`;
   if (!records.length) {
+    el("recordSummary").textContent = "0 条记录";
     el("records").innerHTML = `<div class="empty">没有符合条件的项目</div>`;
     return;
   }
 
+  const pageCount = Math.max(Math.ceil(records.length / TABLE_PAGE_SIZE), 1);
+  // Clamped rather than reset: a filter that shrinks the result set should land the user on the last
+  // page, not silently throw them back to the first.
+  const page = Math.min(Math.max(state.tablePage, 1), pageCount);
+  state.tablePage = page;
+  const start = (page - 1) * TABLE_PAGE_SIZE;
+  const pageRecords = records.slice(start, start + TABLE_PAGE_SIZE);
+  el("recordSummary").textContent = records.length > TABLE_PAGE_SIZE
+    ? `${records.length} 条记录 · 第 ${page}/${pageCount} 页（第 ${start + 1}–${start + pageRecords.length} 条）`
+    : `${records.length} 条记录`;
+
   const columns = state.adminMode ? [...tableColumns, "操作"] : tableColumns;
+  // Computed once per render instead of once per cell: the presentation depends only on the column and
+  // the column list, so 927,000 calls collapse to one map lookup per cell.
+  const pinnedByColumn = new Map(columns.map((column) => [column, pinnedColumnPresentation(column, tableColumns)]));
+  // Likewise the status dropdown options, which every row shares.
+  const statusOptions = state.adminMode ? uniqueValues("获取状态") : [];
   el("records").innerHTML = `
     <table class="data-table ${state.adminMode ? "admin-table" : "visitor-table"}">
       <thead>
         <tr>${columns.map((column) => renderHeaderCell(column, tableColumns)).join("")}</tr>
       </thead>
       <tbody>
-        ${records.map((record) => renderRow(record)).join("")}
+        ${pageRecords.map((record) => renderRow(record, tableColumns, pinnedByColumn, statusOptions)).join("")}
       </tbody>
     </table>
   `;
+  renderTablePager(records.length, page, pageCount);
 }
 
-function renderRow(record) {
+function renderTablePager(total, page, pageCount) {
+  const target = el("recordPager");
+  if (!target) return;
+  if (pageCount <= 1) {
+    target.innerHTML = "";
+    target.classList.add("hidden");
+    return;
+  }
+  target.classList.remove("hidden");
+  target.innerHTML = `
+    <button class="button mini" type="button" data-table-page="1" ${page === 1 ? "disabled" : ""}>首页</button>
+    <button class="button mini" type="button" data-table-page="${page - 1}" ${page === 1 ? "disabled" : ""}>上一页</button>
+    <span class="pager-label">第 ${page} / ${pageCount} 页 · 共 ${total} 条</span>
+    <button class="button mini" type="button" data-table-page="${page + 1}" ${page === pageCount ? "disabled" : ""}>下一页</button>
+    <button class="button mini" type="button" data-table-page="${pageCount}" ${page === pageCount ? "disabled" : ""}>末页</button>
+  `;
+}
+
+function renderRow(record, tableColumns, pinnedByColumn, statusOptions) {
   const status = cell(record, "获取状态");
   const group = statusGroup(status);
-  const tableColumns = state.adminMode ? visibleAdminColumns() : VISITOR_COLUMNS;
   const cells = tableColumns.map((column) => {
     const value = cell(record, column);
-    const pin = pinnedColumnPresentation(column, tableColumns);
+    const pin = pinnedByColumn.get(column) || { className: "", style: "" };
     if (column === "获取状态" && state.adminMode) {
-      return `<td class="status-cell ${pin.className}" style="${pin.style}">${renderStatusSelect(record, value)}</td>`;
+      return `<td class="status-cell ${pin.className}" style="${pin.style}">${renderStatusSelect(record, value, statusOptions)}</td>`;
     }
     const className = `${column === "项目名称" ? "project-name-cell" : ""} ${pin.className}`;
     return `<td class="${className}" style="${pin.style}" title="${escapeHtml(value)}">${renderFieldValue(column, value)}</td>`;
@@ -993,8 +1070,7 @@ function renderRow(record) {
   `;
 }
 
-function renderStatusSelect(record, value) {
-  const options = uniqueValues("获取状态");
+function renderStatusSelect(record, value, options) {
   const badgeClass = statusGroup(value);
   return `
     <select class="inline-select ${badgeClass}" data-status-record="${escapeHtml(record.record_id)}">
@@ -1436,6 +1512,9 @@ async function loadData() {
   state.fields = data.fields || [];
   state.records = data.records || [];
   state.meta = data.meta || {};
+  // The record array identity is what the uniqueValues memo keys on; replacing it invalidates the
+  // cache implicitly, but an inline edit that added a brand-new value needs the explicit reset.
+  invalidateValueCache();
   await loadProgressModel();
   if (state.adminMode) await loadFieldPreferences();
   await loadRequesterBootstrap();
@@ -1751,11 +1830,13 @@ async function togglePinnedTableColumn(column) {
 function toggleTableSort(column) {
   if (state.sortField !== column) {
     state.sortField = column;
+    state.tablePage = 1;
     state.sortDirection = "asc";
   } else if (state.sortDirection === "asc") {
     state.sortDirection = "desc";
   } else {
     state.sortField = "";
+    state.tablePage = 1;
     state.sortDirection = "";
   }
   renderWorkspace();
@@ -2380,6 +2461,15 @@ el("adminTabs").addEventListener("click", (event) => {
     loadEfficiency().catch((error) => alert(error.message));
   }
 });
+el("recordPager").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-table-page]");
+  if (!button || button.disabled) return;
+  state.tablePage = Number(button.dataset.tablePage) || 1;
+  renderWorkspace();
+  // Back to the top of the list: keeping the old scroll position on a new page shows the user rows
+  // they did not ask for.
+  el("records").scrollIntoView({ block: "start" });
+});
 el("requesterLayoutToggle").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-requester-layout]");
   if (!button || button.dataset.requesterLayout === state.requesterLayout) return;
@@ -2502,12 +2592,14 @@ el("filterGrid").addEventListener("change", (event) => {
   const select = event.target.closest("select[data-filter-field]");
   if (!select) return;
   state.filters[select.dataset.filterField] = select.value;
+  state.tablePage = 1;
   renderWorkspace();
 });
 el("activeFilters").addEventListener("click", (event) => {
   const clearField = event.target.closest("button[data-clear-filter]")?.dataset.clearFilter;
   if (clearField) {
     delete state.filters[clearField];
+    state.tablePage = 1;
     renderWorkspace();
   } else if (event.target.id === "clearAllFilters") {
     state.filters = {};
@@ -2548,6 +2640,7 @@ el("records").addEventListener("change", async (event) => {
   const filterSelect = event.target.closest("select[data-filter-field]");
   if (filterSelect) {
     state.filters[filterSelect.dataset.filterField] = filterSelect.value;
+    state.tablePage = 1;
     renderWorkspace();
     return;
   }
