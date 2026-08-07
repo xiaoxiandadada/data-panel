@@ -7,8 +7,14 @@ stages:
 variables:
   CI_REGISTRY: docker.shlab.tech
   CI_REGISTRY_USER: cicd@1397355716557288
-  # CI_REGISTRY_PASSWORD 与 GITOPS_TOKEN 由 GitLab → Settings → CI/CD → Variables 注入
-  # （勾选 Masked 与 Protected）。不要写回本文件：本仓库有公开的 GitHub 镜像。
+  # 凭据由 GitLab → Settings → CI/CD → Variables 注入，不要写回本文件：
+  # 本仓库有公开的 GitHub 镜像，写在这里等于公开发布。
+  #
+  # 名字刻意不叫 CI_REGISTRY_PASSWORD —— 那是 GitLab 的预定义变量（GitLab 自带镜像仓库用它），
+  # 官方明确不建议用 CI_ 前缀命名自定义变量，同名的项目级变量可能被预定义值盖掉。
+  # 之前这个值写在本文件的 variables: 块里（文件级优先级最高）所以一直正常，
+  # 搬到项目 Variables 后就可能被 GitLab 的值顶掉，kaniko 会拿错误的凭据去登
+  # docker.shlab.tech 并得到 401。用一个自有前缀的名字彻底绕开这个歧义。
 
 before_script:
   - export IMAGE_REPOSITORY=${CI_PROJECT_PATH}
@@ -37,8 +43,10 @@ build:
   retry: 2
   script:
     - echo "building ${IMAGE_NAME}"
+    # 明确失败，而不是让 kaniko 拿着空密码去推镜像然后报一个看不出原因的 401
+    - if [ -z "${SHLAB_REGISTRY_PASSWORD}" ]; then echo "SHLAB_REGISTRY_PASSWORD 未注入：请在 Settings → CI/CD → Variables 添加，且确认它对当前分支可见"; exit 1; fi
     - mkdir -p /kaniko/.docker
-    - echo "{\"auths\":{\"${CI_REGISTRY}\":{\"auth\":\"$(printf "%s:%s" "${CI_REGISTRY_USER}" "${CI_REGISTRY_PASSWORD}" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
+    - echo "{\"auths\":{\"${CI_REGISTRY}\":{\"auth\":\"$(printf "%s:%s" "${CI_REGISTRY_USER}" "${SHLAB_REGISTRY_PASSWORD}" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
     - >-
       /kaniko/executor
       --context "${CI_PROJECT_DIR}"
