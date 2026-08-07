@@ -588,8 +588,25 @@ test("five Feishu business tables merge serially, with 数据团队总表 last",
   const reads = [];
   const service = new LarkBaseSyncService(
     {
-      readDataset: async () => stored,
+      // Every read is a fresh snapshot, exactly as the Mongo-backed store behaves: it rebuilds records
+      // from documents. Handing out the live object instead would let an in-place write mutate a
+      // caller's earlier snapshot, and the whole-round status diff compares two such snapshots.
+      readDataset: async () => structuredClone(stored),
       saveDataset: async (next) => { stored = next; },
+      // Mirrors the real store: applies only the changed records and never deletes, which is what
+      // stops a sync from wiping a requirement submitted while it was running.
+      writeChangedRecords: async (changed, fields) => {
+        const byKey = new Map(stored.records.map((record) => [importBusinessKey(record.fields || {}), record]));
+        for (const record of changed) {
+          const key = importBusinessKey(record.fields || {});
+          const current = byKey.get(key);
+          if (current) current.fields = record.fields;
+          else { stored.records.push(record); byKey.set(key, record); }
+        }
+        if (fields?.length) stored.fields = fields;
+        return changed.length;
+      },
+      publishDataVersion: async () => {},
       appendImportBatch: async () => {}
     },
     {
@@ -640,8 +657,25 @@ test("one inaccessible Feishu table does not block the other data sources", asyn
   let stored = dataset([]);
   const service = new LarkBaseSyncService(
     {
-      readDataset: async () => stored,
+      // Every read is a fresh snapshot, exactly as the Mongo-backed store behaves: it rebuilds records
+      // from documents. Handing out the live object instead would let an in-place write mutate a
+      // caller's earlier snapshot, and the whole-round status diff compares two such snapshots.
+      readDataset: async () => structuredClone(stored),
       saveDataset: async (next) => { stored = next; },
+      // Mirrors the real store: applies only the changed records and never deletes, which is what
+      // stops a sync from wiping a requirement submitted while it was running.
+      writeChangedRecords: async (changed, fields) => {
+        const byKey = new Map(stored.records.map((record) => [importBusinessKey(record.fields || {}), record]));
+        for (const record of changed) {
+          const key = importBusinessKey(record.fields || {});
+          const current = byKey.get(key);
+          if (current) current.fields = record.fields;
+          else { stored.records.push(record); byKey.set(key, record); }
+        }
+        if (fields?.length) stored.fields = fields;
+        return changed.length;
+      },
+      publishDataVersion: async () => {},
       appendImportBatch: async () => {}
     },
     {
@@ -695,8 +729,25 @@ test("Feishu sync establishes a quiet baseline before emitting status-change eve
   const events = [];
   const service = new LarkBaseSyncService(
     {
-      readDataset: async () => stored,
+      // Every read is a fresh snapshot, exactly as the Mongo-backed store behaves: it rebuilds records
+      // from documents. Handing out the live object instead would let an in-place write mutate a
+      // caller's earlier snapshot, and the whole-round status diff compares two such snapshots.
+      readDataset: async () => structuredClone(stored),
       saveDataset: async (next) => { stored = next; },
+      // Mirrors the real store: applies only the changed records and never deletes, which is what
+      // stops a sync from wiping a requirement submitted while it was running.
+      writeChangedRecords: async (changed, fields) => {
+        const byKey = new Map(stored.records.map((record) => [importBusinessKey(record.fields || {}), record]));
+        for (const record of changed) {
+          const key = importBusinessKey(record.fields || {});
+          const current = byKey.get(key);
+          if (current) current.fields = record.fields;
+          else { stored.records.push(record); byKey.set(key, record); }
+        }
+        if (fields?.length) stored.fields = fields;
+        return changed.length;
+      },
+      publishDataVersion: async () => {},
       appendImportBatch: async () => {}
     },
     {
@@ -757,8 +808,25 @@ test("a table whose permission arrives late does not replay its history as statu
   const events = [];
   const service = new LarkBaseSyncService(
     {
-      readDataset: async () => stored,
+      // Every read is a fresh snapshot, exactly as the Mongo-backed store behaves: it rebuilds records
+      // from documents. Handing out the live object instead would let an in-place write mutate a
+      // caller's earlier snapshot, and the whole-round status diff compares two such snapshots.
+      readDataset: async () => structuredClone(stored),
       saveDataset: async (next) => { stored = next; },
+      // Mirrors the real store: applies only the changed records and never deletes, which is what
+      // stops a sync from wiping a requirement submitted while it was running.
+      writeChangedRecords: async (changed, fields) => {
+        const byKey = new Map(stored.records.map((record) => [importBusinessKey(record.fields || {}), record]));
+        for (const record of changed) {
+          const key = importBusinessKey(record.fields || {});
+          const current = byKey.get(key);
+          if (current) current.fields = record.fields;
+          else { stored.records.push(record); byKey.set(key, record); }
+        }
+        if (fields?.length) stored.fields = fields;
+        return changed.length;
+      },
+      publishDataVersion: async () => {},
       appendImportBatch: async () => {}
     },
     {
@@ -1585,4 +1653,64 @@ test("hashApiKey 是稳定的 SHA-256", () => {
   assert.equal(hashApiKey("abc"), hashApiKey("abc"));
   assert.notEqual(hashApiKey("abc"), hashApiKey("abd"));
   assert.equal(hashApiKey(""), hashApiKey(null));
+});
+
+test("同步只写变化的记录，不会覆盖掉同时提交的需求", async () => {
+  // 这是「需求方加了需求，第二次登录就看不到了」的根因。
+  // 同步过去是 读快照 → 合并 → saveDataset（deleteMany + insertMany 整表覆盖），
+  // 在「读」和「写」之间提交的需求会被那份旧快照静默覆盖掉。
+  // 一轮同步 5 张源表 = 5 个窗口，每 5 分钟一轮。
+  const existing = dataset([
+    { "项目名称": "已有需求", "任务代码": "TK0001", "获取状态": "已完结" }
+  ]);
+  // 同步读到的快照 —— 此刻还没有那条新需求
+  const syncSnapshot = structuredClone(existing);
+
+  // 窗口期内需求方提交，落库
+  const submitted = { record_id: "import-99", fields: demandToLedgerFields(
+    { requesterName: "王冠楚", fields: { "需求描述": "窗口期提交" } },
+    [{ id: "项目名称", name: "项目名称" }, { id: "需求人", name: "需求人" }, { id: "需求负责人", name: "需求负责人" }, { id: "获取状态", name: "获取状态" }]
+  ) };
+  const live = structuredClone(existing);
+  live.records.push(submitted);
+
+  // 同步基于旧快照合并，只拿出真正变化的记录
+  const merged = mergeImportedDataset(syncSnapshot, dataset([
+    { "项目名称": "飞书来的需求", "任务代码": "TK0002", "获取状态": "验收中" }
+  ]), "数据团队总表");
+
+  // 关键断言：changed 里只有飞书那条新记录，不包含（也不会抹掉）需求方提交的那条
+  assert.equal(merged.changed.length, 1);
+  assert.equal(merged.changed[0].fields["任务代码"], "TK0002");
+  assert.equal(merged.changed.some((record) => record.fields["需求人"] === "王冠楚"), false);
+
+  // 把 changed 应用到「含新需求」的真实库上，两条都在
+  const byKey = new Map(live.records.map((record) => [importBusinessKey(record.fields || {}), record]));
+  for (const record of merged.changed) {
+    const key = importBusinessKey(record.fields || {});
+    if (byKey.has(key)) byKey.get(key).fields = record.fields;
+    else live.records.push(record);
+  }
+  assert.equal(live.records.length, 3);
+  assert.equal(requesterRecords(live, "王冠楚").length, 1, "需求方提交的需求必须还在");
+  // 反过来，整表覆盖写会丢：这正是修复前的行为
+  assert.equal(requesterRecords(merged.dataset, "王冠楚").length, 0);
+});
+
+test("合并结果里未变化的记录不会进入 changed", async () => {
+  // writeChangedRecords 写的量直接取决于这个：一轮同步只改了 60 条，就该写 60 条，
+  // 而不是把 6020 条全部重写一遍。
+  const existing = dataset([
+    { "项目名称": "Alpha", "任务代码": "TK0001", "获取状态": "已完结", "数据来源": "数据团队总表" },
+    { "项目名称": "Beta", "任务代码": "TK0002", "获取状态": "验收中", "数据来源": "数据团队总表" }
+  ]);
+  const merged = mergeImportedDataset(existing, dataset([
+    { "项目名称": "Alpha", "任务代码": "TK0001", "获取状态": "已完结" },
+    { "项目名称": "Beta", "任务代码": "TK0002", "获取状态": "待结算" }
+  ]), "数据团队总表");
+  assert.equal(merged.summary.unchanged, 1);
+  assert.equal(merged.summary.updated, 1);
+  // 只有 Beta 变了
+  assert.deepEqual(merged.changed.map((record) => record.fields["任务代码"]), ["TK0002"]);
+  assert.equal(merged.changed[0].fields["获取状态"], "待结算");
 });

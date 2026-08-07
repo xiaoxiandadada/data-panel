@@ -1005,47 +1005,78 @@ function renderStatusSelect(record, value) {
 }
 
 /**
- * The quantified stage bar: one segment per stage, sized by its share of the 0–100 axis, so the shape
- * of the bar itself says which stage the requirement is in. The single-fill bar it replaces could only
- * express "somewhere along the way".
+ * The requester-facing progress block.
+ *
+ * Rewritten because the first version was quantified but not legible: eight anonymous 35px segments in
+ * a card, with the stage name only in a hover tooltip and a caption reading "里程碑 1/2" — a requester
+ * has no idea which milestones those are. What a requester actually wants to know is which step of how
+ * many, what is happening now, what happens next, and when they get their data. So all four are stated
+ * in words, and the segments carry their stage names.
  */
 function renderMiniProgress(record) {
   const detail = progressDetail(record);
-  const flagNote = detail.flags.includes("rework")
-    ? "返工中，进度已回退至生产阶段"
-    : detail.flags.includes("blocked")
-    ? "存在阻塞，进度暂不推进"
-    : "";
-  const segments = detail.stages.map((stage) => {
+  const stages = detail.stages || [];
+  const total = stages.length;
+  const step = detail.stageIndex >= 0 ? detail.stageIndex + 1 : 0;
+  const next = detail.stageIndex >= 0 ? stages[detail.stageIndex + 1] : null;
+  const expected = cell(record, "期望交付日期");
+  const overdue = isOverdue(expected) && detail.outcome === "in-progress";
+
+  if (!detail.measured) {
+    const why = detail.outcome === "cancelled"
+      ? "此需求已取消，不再推进。"
+      : "此需求还没有设置状态，暂时无法显示进度。可联系对接人确认。";
+    return `<div class="mini-progress unmeasured"><p class="progress-note">${escapeHtml(why)}</p></div>`;
+  }
+
+  const segments = stages.map((stage) => {
     const span = Math.max(stage.end - stage.start, 1);
-    const reached = stage.state === "done"
-      ? 1
-      : stage.state === "current"
-      ? Math.min(Math.max((detail.percent - stage.start) / span, 0), 1)
+    const reached = stage.state === "done" ? 1
+      : stage.state === "current" ? Math.min(Math.max((detail.percent - stage.start) / span, 0), 1)
       : 0;
     const color = STAGE_COLORS[stage.key] || "#2563eb";
     return `
-      <span class="stage-seg ${stage.state}" style="flex:${span}" title="${escapeHtml(`${stage.label} · ${stage.start}–${stage.end}% · ${stage.description}`)}">
-        <i style="width:${Math.round(reached * 100)}%;background:${color}"></i>
+      <span class="stage-step ${stage.state}" title="${escapeHtml(`${stage.label} · ${stage.description}`)}">
+        <i class="stage-bar"><b style="width:${Math.round(reached * 100)}%;background:${color}"></b></i>
+        <em>${escapeHtml(stage.shortLabel || stage.label)}</em>
       </span>
     `;
   }).join("");
-  const caption = detail.measured
-    ? `${escapeHtml(detail.stageLabel)}${detail.evidenceTotal ? ` · 里程碑 ${detail.evidenceFilled}/${detail.evidenceTotal}` : ""}`
-    : detail.outcome === "cancelled" ? "需求已取消，不计入进度" : "状态未设置，无法量化";
+
+  const flagNote = detail.flags.includes("rework")
+    ? "正在返工，进度已回退到生产阶段重做"
+    : detail.flags.includes("blocked")
+    ? "目前有阻塞，进度暂时不会推进"
+    : "";
+
   return `
-    <div class="mini-progress ${detail.measured ? "" : "unmeasured"}" aria-label="当前进度 ${detail.percent}%，阶段 ${escapeHtml(detail.stageLabel)}">
+    <div class="mini-progress" aria-label="第 ${step} 步，共 ${total} 步：${escapeHtml(detail.stageLabel)}，完成度 ${detail.percent}%">
       <div class="mini-progress-top">
-        <span>${escapeHtml(detail.status)}</span>
-        <strong>${detail.measured ? `${detail.percent}%` : "—"}</strong>
+        <span class="progress-step">第 ${step}/${total} 步 · <b>${escapeHtml(detail.stageLabel)}</b></span>
+        <strong>${detail.percent}%</strong>
       </div>
-      <div class="stage-track">${segments}</div>
-      <div class="mini-progress-foot">
-        <span>${caption}</span>
-        ${flagNote ? `<em class="progress-flag">${escapeHtml(flagNote)}</em>` : ""}
-      </div>
+      <div class="stage-steps">${segments}</div>
+      <p class="progress-note">
+        ${detail.outcome === "delivered"
+          ? "已交付完成并归档。"
+          : `当前进行到「${escapeHtml(detail.stageLabel)}」${next ? `，下一步是「${escapeHtml(next.label)}」` : ""}。`}
+        ${expected && detail.outcome !== "delivered"
+          ? `期望交付 ${escapeHtml(expected)}${overdue ? "（已超期）" : ""}。`
+          : ""}
+      </p>
+      ${flagNote ? `<p class="progress-flag">${escapeHtml(flagNote)}</p>` : ""}
     </div>
   `;
+}
+
+// 期望交付日期 is a text column and really does hold placeholders like 最大值（待填）, so a value that
+// does not parse as a date is treated as "no date" rather than as overdue.
+function isOverdue(value) {
+  const text = String(value || "").trim();
+  if (!text) return false;
+  const time = Date.parse(text.replace(/\//g, "-"));
+  if (!Number.isFinite(time)) return false;
+  return time < Date.now();
 }
 
 function nameListIncludes(value, name) {

@@ -292,18 +292,15 @@ export class LedgerController {
     const requesterName = user.name;
     const dataset = await this.store.readDataset();
     ensureFields(dataset, ["需求负责人", "需求人", "关注人", "PM"]);
-    const record: LedgerRecord = {
-      record_id: nextRecordId(dataset.records || []),
-      fields: demandToLedgerFields({ ...payload, requesterName }, dataset.fields || [])
-    };
-    dataset.records = [record, ...(dataset.records || [])];
-    dataset.meta = {
-      ...(dataset.meta || {}),
+    const submittedFields = demandToLedgerFields({ ...payload, requesterName }, dataset.fields || []);
+    // Insert just this record. Writing the whole dataset back here would discard anything a
+    // concurrent sync had merged in the meantime — the mirror image of the bug that made submitted
+    // requirements vanish.
+    const record = await this.store.insertRecord(submittedFields, {
       status: "ok",
       syncedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
-      message: `需求方提交 ${String(record.fields["项目名称"] || record.record_id)}`
-    };
-    await this.store.saveDataset(dataset);
+      message: `需求方提交 ${String(submittedFields["项目名称"] || "新需求")}`
+    });
     await this.store.appendLog(createLog({
       record_id: record.record_id,
       type: "新需求提交",
@@ -315,7 +312,10 @@ export class LedgerController {
       note: "需求方自助提交，自动进入交付管线"
     }));
     await this.queue.enqueue("request.submitted", { recordId: record.record_id, requesterOpenId: user.openId });
-    return { ok: true, record, data: attachProgress(publicDataset(dataset, requesterRecords(dataset, requesterName)), dataset.records) };
+    // Re-read: `dataset` is the pre-insert snapshot, so building the response from it would return a
+    // payload that does not contain the requirement the user just submitted.
+    const current = await this.store.readDataset();
+    return { ok: true, record, data: attachProgress(publicDataset(current, requesterRecords(current, requesterName)), current.records) };
   }
 
   @Patch("api/requests/:id/followers")
@@ -440,7 +440,7 @@ export class LedgerController {
       actor: user?.name || "超级管理员",
       createdAt: new Date().toISOString()
     };
-    await this.store.saveDataset(merged.dataset);
+    await this.store.writeChangedRecords(merged.changed, merged.fields, merged.dataset.meta);
     await this.store.appendImportBatch(batch);
     await this.satisfaction.applyDefaults();
     await this.queue.enqueue("dataset.imported", { source, count: incoming.records.length });
@@ -459,6 +459,26 @@ export class LedgerController {
     await this.requireSuperAdmin(request, token);
     const user = await this.currentUser(request);
     return { ok: true, results: await this.larkSync.syncAll(user?.name || "超级管理员") };
+  }
+
+  /**
+   * Re-reads one source table on demand. `key` accepts the source key (`ledger`, `corpus`, `pool`,
+   * `gaofeng`, `clarify`), the Feishu table id, or the table's display name — whichever the caller
+   * happens to have. Exists so a single table can be refreshed without paying for a full round.
+   */
+  @Post("api/sync/lark/sources/:key")
+  @HttpCode(200)
+  async syncLarkSource(@Req() request: Request, @Param("key") key: string, @Headers("x-admin-token") token?: string) {
+    await this.requireSuperAdmin(request, token);
+    const user = await this.currentUser(request);
+    try {
+      return { ok: true, results: await this.larkSync.syncSource(key, user?.name || "超级管理员") };
+    } catch (error) {
+      throw new HttpException(
+        { ok: false, message: error instanceof Error ? error.message : "同步失败" },
+        HttpStatus.BAD_REQUEST
+      );
+    }
   }
 
   @Get("api/sync/lark/sources")

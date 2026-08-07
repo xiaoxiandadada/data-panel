@@ -970,45 +970,76 @@ body.admin-mode .admin-command-bar.admin-only {
   color: var(--muted);
 }
 
-/* 分段进度条：每段宽度按该阶段占 0–100 轴的比例，条形本身就说明处在哪个阶段 */
-.stage-track {
+/* 阶段步骤条：每一段都带阶段名，需求方不用悬停就知道自己在哪一步 */
+.stage-steps {
   display: flex;
-  gap: 2px;
-  height: 10px;
+  gap: 3px;
+  align-items: flex-end;
 }
 
-.stage-seg {
-  position: relative;
+.stage-step {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.stage-step .stage-bar {
+  display: block;
+  height: 8px;
   border-radius: 2px;
   background: #e6ebf0;
   overflow: hidden;
 }
 
-.stage-seg i {
+.stage-step .stage-bar b {
   display: block;
   height: 100%;
   transition: width 0.3s ease;
 }
 
-.stage-seg.current {
-  outline: 1px solid rgba(37, 99, 235, 0.45);
-  outline-offset: 1px;
+.stage-step em {
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+  text-align: center;
+  white-space: nowrap;
 }
 
-.mini-progress-foot {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 12px;
-  justify-content: space-between;
+/* 当前阶段加重，让「我在这一步」一眼可见 */
+.stage-step.current em {
+  color: var(--brand);
+  font-weight: 700;
+}
+
+.stage-step.done em {
+  color: #2f855a;
+}
+
+.progress-step {
+  color: var(--muted);
+}
+
+.progress-step b {
+  color: var(--text);
+}
+
+.progress-note {
   margin-top: 8px;
   color: var(--muted);
   font-size: 12px;
+  line-height: 1.55;
 }
 
 .progress-flag {
-  color: #c2410c;
-  font-style: normal;
-  font-weight: 700;
+  margin-top: 6px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--danger);
+  border-radius: 4px;
+  background: #fff5ef;
+  color: #9a3412;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .requester-table {

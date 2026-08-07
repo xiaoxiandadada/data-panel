@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { LarkOAuthService } from "../auth/lark-oauth.service.js";
 import { stringifyCell } from "../core/ledger-utils.js";
 import { applySourceAliasesToDataset, applySourceFieldAliases, type LarkSourceKey } from "../core/source-fields.js";
-import type { FieldValue, ImportBatch, LedgerRecord } from "../core/types.js";
+import type { Dataset, FieldValue, ImportBatch, LedgerRecord } from "../core/types.js";
 import { LedgerStoreService } from "../infra/ledger-store.service.js";
 import { QueueService } from "../infra/queue.service.js";
 import { importBusinessKey, mergeFields, mergeImportedDataset } from "../ledger/parse-utils.js";
@@ -199,6 +199,24 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
     return this.enqueueSync(this.sourceConfigurations().filter((item) => item.configured), actor);
   }
 
+  /**
+   * Syncs one table on demand, by source key or by Feishu table id.
+   *
+   * Kept as a separate entry point from `syncAll` so a single table can be re-read without paying for
+   * the other four — useful when one table's permissions were just granted, or when someone edited one
+   * table and does not want to wait for the interval. Goes through the same queue as every other sync,
+   * so it cannot run concurrently with a full round.
+   */
+  async syncSource(keyOrTableId: string, actor = "系统"): Promise<LarkSyncResult[]> {
+    if (!this.isConfigured()) throw new Error("飞书 Base 自动同步配置不完整");
+    const wanted = String(keyOrTableId || "").trim();
+    const source = this.sourceConfigurations()
+      .filter((item) => item.configured)
+      .find((item) => item.key === wanted || item.tableId === wanted || item.source === wanted);
+    if (!source) throw new Error(`未找到可同步的数据源：${wanted}`);
+    return this.enqueueSync([source], actor);
+  }
+
   scheduleTableSync(tableId: string, recordId = "", actor = "飞书实时推送"): LarkSyncSource | null {
     const source = this.sourceConfigurations().find((item) => item.configured && item.tableId === tableId);
     if (!source) return null;
@@ -242,6 +260,24 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
     return this.enqueueTask(() => this.performSync(sources, actor));
   }
 
+  /**
+   * Reads every configured table and folds the result into the ledger.
+   *
+   * Shape of the work, and why it is this shape:
+   *
+   * - **Tables are fetched concurrently.** A round is dominated by waiting on Feishu: 5592 records over
+   *   paginated 500-record pages took 41 seconds sequentially, and almost all of that was network
+   *   latency rather than CPU. Fetching in parallel makes the round cost roughly the slowest single
+   *   table instead of the sum of all five. Concurrency is capped rather than unbounded so a round
+   *   cannot trip Feishu's rate limits.
+   * - **The ledger is read once.** It used to be re-read inside the loop, so a 6020-record ledger was
+   *   pulled out of MongoDB five times per round for no benefit.
+   * - **Merging stays strictly sequential, in the configured order.** `mergeFields` is
+   *   last-writer-wins, so 待澄清项目 → 需求池 → 战略语料库 → 高峰 → 总表 is load-bearing: the 总表 has
+   *   to be able to overrule the intake tables. Fetching in parallel does not change merge order.
+   * - **One delta write at the end.** Records changed by several sources are collapsed to their final
+   *   merged form, so each record is written at most once per round.
+   */
   private async performSync(sources: LarkSyncSource[], actor: string): Promise<LarkSyncResult[]> {
     this.syncing = true;
     try {
@@ -250,8 +286,8 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
       const errors: string[] = [];
       const initialDataset = await this.store.readDataset();
       const ledgerSeeded = initialDataset.records.length > 0;
-      // Captured before the loop: a table gains its baseline at the end of its own first successful
-      // read, and a table reading for the first time in this round must not contribute to the diff.
+      // Captured before merging: a table gains its baseline once it has been read successfully, and a
+      // table reading for the first time in this round must not contribute to the diff.
       const baselinedAtStart = new Set(sources.filter((item) => this.notificationBaselines.has(item.key)).map((item) => item.key));
       // Business keys this round touched, mapped to the source that supplied them. Collected across
       // all sources and diffed once at the end rather than per source: several tables carry 获取状态
@@ -259,39 +295,21 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
       // per-source diff would see the pool write X, then the 总表 overwrite it with Y, and push a
       // notification for a status that never actually changed — every single sync cycle.
       const touchedKeys = new Map<string, string>();
+
+      const fetched = await this.fetchSources(sources, appToken);
+
+      // Accumulates across sources so a record several tables touch is written once, carrying the
+      // final merged fields rather than each intermediate version.
+      const changedByKey = new Map<string, LedgerRecord>();
+      let working = initialDataset;
+      let mergedFields = initialDataset.fields || [];
+      let latestMeta = initialDataset.meta || {};
+
       for (const source of sources) {
-        try {
-          const incoming = applySourceAliasesToDataset(source.key, await this.lark.listBaseDataset(appToken, source.tableId, source.viewId));
-          const existing = await this.store.readDataset();
-          const merged = mergeImportedDataset(existing, incoming, source.source);
-          const batch: ImportBatch = {
-            id: randomUUID(),
-            source: source.source,
-            fileName: source.tableId,
-            mode: "lark",
-            ...merged.summary,
-            actor,
-            createdAt: new Date().toISOString()
-          };
-          await this.store.saveDataset(merged.dataset);
-          await this.store.appendImportBatch(batch);
-          if (ledgerSeeded && baselinedAtStart.has(source.key)) {
-            for (const record of incoming.records || []) {
-              touchedKeys.set(importBusinessKey(record.fields || {}), source.source);
-            }
-          }
-          await this.queue.enqueue("dataset.synced", { source: source.source, count: incoming.records.length });
-          const syncedAt = new Date().toISOString();
-          this.sourceStatuses.set(source.key, {
-            source: source.source,
-            tableId: source.tableId,
-            lastSyncedAt: syncedAt,
-            lastError: ""
-          });
-          this.notificationBaselines.add(source.key);
-          results.push({ source: source.source, tableId: source.tableId, batch });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : "飞书 Base 同步失败";
+        const outcome = fetched.get(source.key);
+        if (!outcome) continue;
+        if (outcome.error) {
+          const message = outcome.error instanceof Error ? outcome.error.message : "飞书 Base 同步失败";
           const sourceError = `${source.source}：${message}`;
           errors.push(sourceError);
           this.sourceStatuses.set(source.key, {
@@ -301,7 +319,48 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
             lastError: message
           });
           console.warn(`Lark Base source sync failed: ${sourceError}`);
+          continue;
         }
+        const incoming = outcome.dataset!;
+        const merged = mergeImportedDataset(working, incoming, source.source);
+        // The merged dataset becomes the base for the next source, which is what preserves
+        // last-writer-wins across the configured order without touching the database in between.
+        working = merged.dataset;
+        mergedFields = merged.fields;
+        latestMeta = merged.dataset.meta || latestMeta;
+        for (const record of merged.changed) changedByKey.set(importBusinessKey(record.fields || {}), record);
+
+        const batch: ImportBatch = {
+          id: randomUUID(),
+          source: source.source,
+          fileName: source.tableId,
+          mode: "lark",
+          ...merged.summary,
+          actor,
+          createdAt: new Date().toISOString()
+        };
+        await this.store.appendImportBatch(batch);
+        if (ledgerSeeded && baselinedAtStart.has(source.key)) {
+          for (const record of incoming.records || []) {
+            touchedKeys.set(importBusinessKey(record.fields || {}), source.source);
+          }
+        }
+        await this.queue.enqueue("dataset.synced", { source: source.source, count: incoming.records.length });
+        this.sourceStatuses.set(source.key, {
+          source: source.source,
+          tableId: source.tableId,
+          lastSyncedAt: new Date().toISOString(),
+          lastError: ""
+        });
+        this.notificationBaselines.add(source.key);
+        results.push({ source: source.source, tableId: source.tableId, batch });
+      }
+
+      // One write, one version bump. Bumping per source made the browser re-download the entire
+      // dataset up to five times for what a user experiences as a single update.
+      if (results.length) {
+        await this.store.writeChangedRecords([...changedByKey.values()], mergedFields, latestMeta, { bumpVersion: false });
+        await this.store.publishDataVersion();
       }
       // One diff for the whole round, against the state before any source ran, so only a status that
       // survives every source's merge is reported as a change.
@@ -319,6 +378,42 @@ export class LarkBaseSyncService implements OnApplicationBootstrap, OnModuleDest
     } finally {
       this.syncing = false;
     }
+  }
+
+  /**
+   * Reads every table concurrently, capped, and returns each outcome rather than throwing.
+   *
+   * Errors are captured per table instead of propagating so one inaccessible table cannot abort the
+   * round — a table still waiting on its Feishu permissions must not stop the other four from syncing.
+   *
+   * The cap exists because Feishu rate-limits Base reads per app. Five tables at once is fine today,
+   * but the corpus table alone is ten paginated requests, so an uncapped fan-out over more tables
+   * would eventually trip the limit and turn a fast round into a retry storm.
+   */
+  private async fetchSources(
+    sources: LarkSyncSource[],
+    appToken: string
+  ): Promise<Map<LarkSyncSource["key"], { dataset?: Dataset; error?: unknown }>> {
+    const outcomes = new Map<LarkSyncSource["key"], { dataset?: Dataset; error?: unknown }>();
+    const limit = Math.max(Number(process.env.LARK_SYNC_CONCURRENCY || 3), 1);
+    const queue = [...sources];
+    const workers = Array.from({ length: Math.min(limit, queue.length) }, async () => {
+      for (;;) {
+        const source = queue.shift();
+        if (!source) return;
+        try {
+          const dataset = applySourceAliasesToDataset(
+            source.key,
+            await this.lark.listBaseDataset(appToken, source.tableId, source.viewId)
+          );
+          outcomes.set(source.key, { dataset });
+        } catch (error) {
+          outcomes.set(source.key, { error });
+        }
+      }
+    });
+    await Promise.all(workers);
+    return outcomes;
   }
 
   private async enqueueStatusChanges(

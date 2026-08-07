@@ -1,5 +1,5 @@
 import readXlsxFile from "read-excel-file/node";
-import type { Dataset, FieldValue } from "../core/types.js";
+import type { Dataset, FieldValue, LedgerRecord } from "../core/types.js";
 import { importBusinessKey, nextRecordId, rowsToDataset, stringifyCell } from "../core/ledger-utils.js";
 
 export { importBusinessKey };
@@ -15,6 +15,18 @@ export interface ImportMergeSummary {
 export interface ImportMergeResult {
   dataset: Dataset;
   summary: ImportMergeSummary;
+  /**
+   * Only the records this merge actually inserted or changed.
+   *
+   * Exists so a caller can persist the delta instead of rewriting the whole collection. The full-table
+   * rewrite (`saveDataset`, which is `deleteMany` + `insertMany`) is a lost-update hazard: a
+   * requirement submitted between the merge's read and its write is silently deleted, because the
+   * snapshot being written back never contained it. Measured: a 5-source sync round has five such
+   * windows, every five minutes.
+   */
+  changed: LedgerRecord[];
+  /** Column names the merge introduced, so the field list can be extended without a full rewrite. */
+  fields: Dataset["fields"];
 }
 
 function excelCell(value: unknown): FieldValue {
@@ -57,6 +69,10 @@ export function mergeImportedDataset(existing: Dataset, incoming: Dataset, sourc
   const incomingKeys = new Set<string>();
   const summary: ImportMergeSummary = { total: incoming.records?.length || 0, inserted: 0, updated: 0, unchanged: 0, conflicts: 0 };
 
+  // Records this round inserted or changed. Collected so the caller can write just these instead of
+  // rewriting the whole collection — see ImportMergeResult.changed for why that matters.
+  const changed: LedgerRecord[] = [];
+
   for (const item of incoming.records || []) {
     const key = importBusinessKey(item.fields || {});
     if (incomingKeys.has(key)) summary.conflicts += 1;
@@ -69,6 +85,7 @@ export function mergeImportedDataset(existing: Dataset, incoming: Dataset, sourc
       };
       records.push(record);
       index.set(key, record);
+      changed.push(record);
       summary.inserted += 1;
       continue;
     }
@@ -77,6 +94,7 @@ export function mergeImportedDataset(existing: Dataset, incoming: Dataset, sourc
       summary.unchanged += 1;
     } else {
       current.fields = merged;
+      changed.push(current);
       summary.updated += 1;
     }
   }
@@ -86,6 +104,7 @@ export function mergeImportedDataset(existing: Dataset, incoming: Dataset, sourc
     ...(incoming.fields || []).map((field) => field.name || field.id),
     "数据来源"
   ])];
+  const fields = fieldNames.map((name) => ({ id: name, name, type: existing.fields.find((field) => (field.name || field.id) === name)?.type || "text" }));
   return {
     dataset: {
       meta: {
@@ -94,10 +113,12 @@ export function mergeImportedDataset(existing: Dataset, incoming: Dataset, sourc
         syncedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
         message: `${cleanSource}：新增 ${summary.inserted}，更新 ${summary.updated}，未变化 ${summary.unchanged}`
       },
-      fields: fieldNames.map((name) => ({ id: name, name, type: existing.fields.find((field) => (field.name || field.id) === name)?.type || "text" })),
+      fields,
       records
     },
-    summary
+    summary,
+    changed,
+    fields
   };
 }
 

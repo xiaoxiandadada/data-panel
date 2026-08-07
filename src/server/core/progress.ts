@@ -13,6 +13,8 @@ import type { FieldValue, LedgerRecord } from "./types.js";
 export interface ProgressStage {
   key: string;
   label: string;
+  /** Two-character label for the stage bar, where there is no room for the full name. */
+  shortLabel: string;
   description: string;
   start: number;
   end: number;
@@ -33,6 +35,7 @@ export const progressStages: readonly ProgressStage[] = [
   {
     key: "intake",
     label: "需求受理",
+    shortLabel: "受理",
     description: "需求已登记，尚未开始澄清",
     start: 3,
     end: 12,
@@ -42,6 +45,7 @@ export const progressStages: readonly ProgressStage[] = [
   {
     key: "clarify",
     label: "需求澄清",
+    shortLabel: "澄清",
     description: "与需求方对齐范围、口径与验收标准",
     start: 12,
     end: 26,
@@ -51,6 +55,7 @@ export const progressStages: readonly ProgressStage[] = [
   {
     key: "solution",
     label: "方案与审批",
+    shortLabel: "方案",
     description: "解决方案设计及 OA / 合同审批",
     start: 26,
     end: 44,
@@ -60,6 +65,7 @@ export const progressStages: readonly ProgressStage[] = [
   {
     key: "sourcing",
     label: "采购与供应商",
+    shortLabel: "采购",
     description: "采购调研、比价与供应商确定",
     start: 44,
     end: 58,
@@ -69,6 +75,7 @@ export const progressStages: readonly ProgressStage[] = [
   {
     key: "production",
     label: "数据生产",
+    shortLabel: "生产",
     description: "采集、标注、入库执行中",
     start: 58,
     end: 80,
@@ -81,6 +88,7 @@ export const progressStages: readonly ProgressStage[] = [
   {
     key: "acceptance",
     label: "交付验收",
+    shortLabel: "验收",
     description: "已交付，需求方验收中",
     start: 80,
     end: 92,
@@ -90,6 +98,7 @@ export const progressStages: readonly ProgressStage[] = [
   {
     key: "settlement",
     label: "结算收尾",
+    shortLabel: "结算",
     description: "验收通过，结算与归档中",
     start: 92,
     // Stops at 99, not 100: the gap to `closed` is deliberate, so a requirement still being settled can
@@ -101,6 +110,7 @@ export const progressStages: readonly ProgressStage[] = [
   {
     key: "closed",
     label: "已完结",
+    shortLabel: "完结",
     description: "交付完成并归档",
     start: 100,
     end: 100,
@@ -121,6 +131,7 @@ export type ProgressStageState = "done" | "current" | "todo";
 export interface ProgressStageView {
   key: string;
   label: string;
+  shortLabel: string;
   description: string;
   start: number;
   end: number;
@@ -166,6 +177,7 @@ function stageViews(currentIndex: number): ProgressStageView[] {
   return progressStages.map((stage, index) => ({
     key: stage.key,
     label: stage.label,
+    shortLabel: stage.shortLabel,
     description: stage.description,
     start: stage.start,
     end: stage.end,
@@ -295,6 +307,7 @@ export function progressModel() {
     stages: progressStages.map((stage) => ({
       key: stage.key,
       label: stage.label,
+      shortLabel: stage.shortLabel,
       description: stage.description,
       start: stage.start,
       end: stage.end,

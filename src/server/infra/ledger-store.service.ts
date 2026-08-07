@@ -1,4 +1,5 @@
 import { Injectable, OnModuleInit } from "@nestjs/common";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -187,6 +188,87 @@ export class LedgerStoreService implements OnModuleInit {
     await this.bumpDataVersion();
   }
 
+  /**
+   * Persists only the records a merge actually changed, keyed on business key.
+   *
+   * The safe counterpart to `saveDataset` for sync and import. `saveDataset` is `deleteMany({})` plus
+   * `insertMany(...)`, which means it writes back a snapshot: any record created between the caller's
+   * read and its write is silently deleted. That is not hypothetical — it is how a requirement
+   * submitted through the requester form disappears, because a 5-source sync round performs five
+   * read-merge-write cycles every five minutes and each one is a window.
+   *
+   * This never deletes. Records absent from `changed` are left exactly as they are, so a concurrent
+   * submit survives regardless of how the two interleave. It is also far cheaper: a sync that changes
+   * 60 of 6020 records writes 60 documents instead of rewriting all 6020.
+   *
+   * Upserts match on `business_key`, not `record_id`. New records are also given a fresh UUID rather
+   * than the `import-N` the merge picked: that number came from the merge's own in-memory snapshot, so
+   * a concurrent submit can legitimately have claimed it already, and the unique index on `record_id`
+   * then rejects the whole batch. Measured against a real MongoDB — the JSON fallback cannot reproduce
+   * it because it has no unique index. Records that already exist keep their id, because `$setOnInsert`
+   * only applies on insert.
+   */
+  async writeChangedRecords(
+    changed: LedgerRecord[],
+    fields: Dataset["fields"],
+    meta: Partial<Dataset["meta"]> = {},
+    options: { bumpVersion?: boolean } = {}
+  ): Promise<number> {
+    const bumpVersion = options.bumpVersion !== false;
+    if (!changed.length) {
+      await this.applyFieldsAndMeta(fields, meta, bumpVersion);
+      return 0;
+    }
+    if (this.mongoReady && this.db) {
+      let sortOrder = await this.nextSortOrder();
+      const operations = changed.map((record) => {
+        const businessKey = importBusinessKey(record.fields || {});
+        return {
+          updateOne: {
+            filter: { business_key: businessKey },
+            update: {
+              $set: { fields: record.fields || {}, business_key: businessKey, updated_at: new Date() },
+              $setOnInsert: { record_id: randomUUID(), sort_order: sortOrder++ }
+            },
+            upsert: true
+          }
+        };
+      });
+      await this.ledgerRecords().bulkWrite(operations, { ordered: false });
+      await this.applyFieldsAndMeta(fields, meta, bumpVersion);
+      return changed.length;
+    }
+    // JSON fallback is single-process local development, so a read-modify-write is safe here.
+    const dataset = await this.readDataset();
+    const byKey = new Map((dataset.records || []).map((record) => [importBusinessKey(record.fields || {}), record]));
+    for (const record of changed) {
+      const key = importBusinessKey(record.fields || {});
+      const current = byKey.get(key);
+      if (current) current.fields = record.fields;
+      else {
+        dataset.records = [...(dataset.records || []), record];
+        byKey.set(key, record);
+      }
+    }
+    dataset.fields = fields.length ? fields : dataset.fields;
+    dataset.meta = { ...(dataset.meta || {}), ...meta };
+    await this.saveDataset(dataset);
+    return changed.length;
+  }
+
+  private async applyFieldsAndMeta(fields: Dataset["fields"], meta: Partial<Dataset["meta"]>, bumpVersion = true): Promise<void> {
+    if (this.mongoReady && this.db) {
+      if (fields.length) await this.ensureDatasetFields(fields.map((field) => field.name || field.id));
+      await this.updateDatasetMeta(meta);
+      if (bumpVersion) await this.bumpDataVersion();
+      return;
+    }
+    const dataset = await this.readDataset();
+    if (fields.length) dataset.fields = fields;
+    dataset.meta = { ...(dataset.meta || {}), ...meta };
+    await this.saveDataset(dataset);
+  }
+
   async appendRecord(record: LedgerRecord): Promise<Dataset> {
     const dataset = await this.readDataset();
     dataset.records = [...(dataset.records || []), record];
@@ -201,7 +283,33 @@ export class LedgerStoreService implements OnModuleInit {
     return dataset;
   }
 
+  /**
+   * Updates one record's fields without rewriting the collection.
+   *
+   * Previously this read the whole dataset, mutated one record and wrote everything back, which meant
+   * a single status edit could clobber whatever a concurrent sync had just merged — and rewrote 6020
+   * documents to change one. The write is now scoped to the one record; the dataset is re-read
+   * afterwards only because callers need it for their response payload.
+   */
   async updateRecord(recordId: string, fields: Record<string, FieldValue>): Promise<{ dataset: Dataset; beforeFields: Record<string, FieldValue>; record: LedgerRecord | null }> {
+    if (this.mongoReady && this.db) {
+      const current = await this.ledgerRecords().findOne({ record_id: recordId }, { projection: { _id: 0, fields: 1 } });
+      if (!current) return { dataset: await this.readDataset(), beforeFields: {}, record: null };
+      const beforeFields: Record<string, FieldValue> = { ...(current.fields || {}) };
+      const nextFields = { ...beforeFields, ...fields };
+      await this.ledgerRecords().updateOne(
+        { record_id: recordId },
+        { $set: { fields: nextFields, business_key: importBusinessKey(nextFields), updated_at: new Date() } }
+      );
+      await this.ensureDatasetFields(Object.keys(nextFields));
+      await this.updateDatasetMeta({
+        status: "ok",
+        syncedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+        message: `已更新 ${String(nextFields["项目名称"] || recordId)}`
+      });
+      await this.bumpDataVersion();
+      return { dataset: await this.readDataset(), beforeFields, record: { record_id: recordId, fields: nextFields } };
+    }
     const dataset = await this.readDataset();
     const record = dataset.records.find((item) => item.record_id === recordId) || null;
     if (!record) return { dataset, beforeFields: {}, record: null };
@@ -215,6 +323,58 @@ export class LedgerStoreService implements OnModuleInit {
     };
     await this.saveDataset(dataset);
     return { dataset, beforeFields, record };
+  }
+
+  /**
+   * Inserts one new record without rewriting the collection — the requester submit path.
+   *
+   * `record_id` is allocated by the store rather than by the caller's in-memory snapshot, so two
+   * submits (or a submit racing a sync) cannot be handed the same id.
+   */
+  async insertRecord(fields: Record<string, FieldValue>, meta: Partial<Dataset["meta"]> = {}): Promise<LedgerRecord> {
+    if (this.mongoReady && this.db) {
+      // Front of the list: a freshly submitted requirement should be the first thing its author sees.
+      const sortOrder = await this.lowestSortOrder() - 1;
+      // The readable `import-N` id is worth keeping for a human-submitted requirement, but two submits
+      // landing together can compute the same N. Retry rather than fail the user's submission.
+      let lastError: unknown = null;
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const record: LedgerRecord = { record_id: await this.nextImportRecordId(), fields };
+        try {
+          await this.ledgerRecords().insertOne({
+            record_id: record.record_id,
+            fields,
+            business_key: importBusinessKey(fields),
+            sort_order: sortOrder,
+            updated_at: new Date()
+          });
+          await this.ensureDatasetFields(Object.keys(fields));
+          await this.updateDatasetMeta(meta);
+          await this.bumpDataVersion();
+          return record;
+        } catch (error) {
+          lastError = error;
+          if ((error as { code?: number }).code !== 11000) throw error;
+        }
+      }
+      throw lastError instanceof Error ? lastError : new Error("需求写入失败");
+    }
+    const dataset = await this.readDataset();
+    const record: LedgerRecord = { record_id: nextRecordId(dataset.records || []), fields };
+    dataset.records = [record, ...(dataset.records || [])];
+    ensureFields(dataset, Object.keys(fields));
+    dataset.meta = { ...(dataset.meta || {}), ...meta };
+    await this.saveDataset(dataset);
+    return record;
+  }
+
+  private async lowestSortOrder(): Promise<number> {
+    const first = await this.ledgerRecords()
+      .find({}, { projection: { sort_order: 1 } })
+      .sort({ sort_order: 1 })
+      .limit(1)
+      .next();
+    return Number(first?.sort_order) || 0;
   }
 
   /**
@@ -347,6 +507,17 @@ export class LedgerStoreService implements OnModuleInit {
       { $set: Object.fromEntries([["key", "meta"], ...entries.map(([field, value]) => [`value.${field}`, value])]) },
       { upsert: true }
     );
+  }
+
+  /**
+   * Signals "the dataset changed" to the browser's version poller.
+   *
+   * Public so a multi-step operation can bump once at the end instead of once per step. A 5-source
+   * sync round bumping per source made the poller re-download the entire dataset up to five times per
+   * round for what the user experiences as a single update.
+   */
+  async publishDataVersion(): Promise<void> {
+    await this.bumpDataVersion();
   }
 
   private async bumpDataVersion(): Promise<void> {
