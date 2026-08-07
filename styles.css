@@ -3197,3 +3197,16 @@ select {
     max-height: none;
   }
 }
+
+/* 管理端详情弹窗里的字段明细：和需求方详情栏同一套呈现，同一个字段在两处长得一样 */
+.detail-field-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 0 20px;
+  align-items: start;
+}
+
+.detail-field-list .detail-group {
+  padding-top: 10px;
+  break-inside: avoid;
+}

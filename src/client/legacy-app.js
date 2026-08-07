@@ -408,11 +408,26 @@ function progressDetail(record) {
 
 // Rebuilt from the model rather than sent per record: the ladder is identical for every requirement at
 // the same stage, and shipping it inline would add 55k redundant objects to an admin payload.
+//
+// Memoized on stageIndex because there are only nine distinct answers (-1 plus the eight stages) while
+// `progressDetail` runs once per record in the admin view and up to three times per record in the
+// requester card view. Every consumer only reads from the result, so sharing one array is safe.
+let stageLadderCache = new Map();
+let stageLadderSource = null;
+
 function stageLadder(model, currentIndex) {
-  return (model?.stages || []).map((stage, index) => ({
+  if (stageLadderSource !== model) {
+    stageLadderSource = model;
+    stageLadderCache = new Map();
+  }
+  const cached = stageLadderCache.get(currentIndex);
+  if (cached) return cached;
+  const ladder = (model?.stages || []).map((stage, index) => ({
     ...stage,
     state: index < currentIndex ? "done" : index === currentIndex ? "current" : "todo"
   }));
+  stageLadderCache.set(currentIndex, ladder);
+  return ladder;
 }
 
 /**
@@ -1317,7 +1332,7 @@ const REQUESTER_DETAIL_GROUPS = [
   { title: "需求信息", fields: ["项目名称", "任务代码", "2026需求编码", "获取状态", "获取渠道"] },
   { title: "归属与人员", fields: ["隶属部门", "需求负责人", "需求人", "关注人", "PM", "项目对接人", "解决方案负责人"] },
   { title: "时间", fields: ["需求提出时间", "期望交付日期", "实际交付完成日期", "Sprint"] },
-  { title: "其他", fields: ["需求文档", "满意度", "满意度评价来源", "数据来源", "项目备注"] }
+  { title: "文档与评价", fields: ["需求文档", "满意度", "满意度评价来源", "数据来源", "项目备注"] }
 ];
 // 这些字段的值是可枚举的，用 chip 呈现比纯文本更容易扫
 const CHIP_FIELDS = new Set(["获取状态", "获取渠道", "隶属部门", "数据来源", "Sprint",
@@ -2410,11 +2425,53 @@ function renderLedgerLogs() {
   `).join("") : `<div class="empty compact">暂无台账日志，后续状态和字段变更会自动记录。</div>`;
 }
 
+/**
+ * 管理端字段分组。前四组和需求方详情栏一致，保证同一个字段在两处的位置和写法相同；
+ * 最后由「其他字段」兜住剩下的所有列 —— 台账有 130+ 列，写死清单必然漏，
+ * 而漏掉的字段在这里是「管理员看不到这条需求的某个信息」，不能接受。
+ */
+const ADMIN_DETAIL_GROUPS = [
+  ...REQUESTER_DETAIL_GROUPS,
+  { title: "交付与验收", fields: ["开始执行时间", "首次全量交付时间", "验收通过交付量(GB)", "预计任务量", "任务耗时", "承接方", "承接方责任人"] },
+  { title: "商务", fields: ["预算金额", "预算归口", "结算金额", "结算完成时间", "专项归口"] },
+  { title: "风险", fields: ["阻塞项", "需求异常原因", "交付异常原因"] }
+];
+
+function renderAdminDetailFields(record) {
+  const claimed = new Set(ADMIN_DETAIL_GROUPS.flatMap((group) => group.fields));
+  const known = state.fields.map((field) => field.name || field.id);
+  const groups = [
+    ...ADMIN_DETAIL_GROUPS,
+    // 兜底组：只收「有值」的剩余列，否则 100 多个空列会把弹窗撑成一堵墙
+    { title: "其他字段", fields: known.filter((field) => !claimed.has(field) && cell(record, field).trim()) }
+  ];
+  let shown = 0;
+  const html = groups.map((group) => {
+    const fields = group.fields.filter((field) => known.includes(field));
+    if (!fields.length) return "";
+    shown += fields.length;
+    return `
+      <section class="detail-group">
+        <h4>${escapeHtml(group.title)}</h4>
+        ${fields.map((field) => `
+          <div class="detail-row">
+            <span class="detail-label">${escapeHtml(field)}</span>
+            <div class="detail-value">${renderDetailValue(field, cell(record, field))}</div>
+          </div>
+        `).join("")}
+      </section>
+    `;
+  }).join("");
+  el("detailFieldList").innerHTML = html || `<div class="empty compact">没有可展示的字段</div>`;
+  el("detailFieldCount").textContent = `${shown} 项`;
+}
+
 async function openDetailDialog(record) {
   if (!record || !state.adminMode) return;
   state.detailRecordId = record.record_id;
   el("detailDialogTitle").textContent = compactTitle(cell(record, "项目名称"));
   el("detailDialogSubtitle").textContent = `${cell(record, "获取状态") || "未设置状态"} · ${cell(record, "项目对接人") || cell(record, "需求负责人") || "未设置负责人"}`;
+  renderAdminDetailFields(record);
   el("ledgerLogList").innerHTML = `<div class="empty compact">正在加载日志...</div>`;
   el("detailDialog").showModal();
   await loadRecordActivity(record.record_id);
@@ -2935,11 +2992,17 @@ el("adminForm").addEventListener("submit", async (event) => {
 const VERSION_POLL_MS = 3000;
 let knownDataVersion = null;
 let versionPollTimer = null;
+// Guards against a second tick starting while the first is still downloading and re-rendering.
+// `knownDataVersion` used to be assigned only after `await loadData()`, so a tick landing during a
+// slow reload still saw the old version and launched a concurrent `loadData()` — under sustained Base
+// edits those compounded. A flag rather than assigning early, so a failed reload is still retried.
+let reloadInFlight = false;
 
 async function pollDataVersion() {
   if (document.hidden) return;
   // Never swap the table out from under an open dialog.
   if (document.querySelector("dialog[open]")) return;
+  if (reloadInFlight) return;
   try {
     const result = await fetchJson(`./api/data/version?t=${Date.now()}`);
     const version = Number(result?.version || 0);
@@ -2948,10 +3011,28 @@ async function pollDataVersion() {
       return;
     }
     if (version === knownDataVersion) return;
-    await loadData();
-    knownDataVersion = version;
+    reloadInFlight = true;
+    // An automatic refresh should not move the page under the reader. innerHTML replacement resets
+    // scroll, so the position is captured and restored around it.
+    const scroller = el("records");
+    const scrollTop = scroller?.scrollTop || 0;
+    const scrollLeft = scroller?.scrollLeft || 0;
+    const pageScroll = window.scrollY;
+    try {
+      await loadData();
+      knownDataVersion = version;
+      const restored = el("records");
+      if (restored) {
+        restored.scrollTop = scrollTop;
+        restored.scrollLeft = scrollLeft;
+      }
+      window.scrollTo({ top: pageScroll });
+    } finally {
+      reloadInFlight = false;
+    }
   } catch {
     // Backend restarting or offline: keep the current data and retry on the next tick.
+    reloadInFlight = false;
   }
 }
 

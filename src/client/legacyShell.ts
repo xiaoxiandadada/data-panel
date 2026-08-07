@@ -491,7 +491,17 @@ export const legacyShell = `<div class="data-atmosphere" aria-hidden="true">
             </div>
             <button id="closeDetailDialog" class="icon-button" type="button" title="关闭">×</button>
           </div>
-          <div class="detail-content ledger-only">
+          <div class="detail-content">
+            <section>
+              <div class="detail-section-head">
+                <div>
+                  <h3>字段明细</h3>
+                  <p>按分组展示该需求的全部字段，空值以「-」标注</p>
+                </div>
+                <span id="detailFieldCount" class="muted-label">0 项</span>
+              </div>
+              <div id="detailFieldList" class="detail-field-list"></div>
+            </section>
             <section>
               <div class="detail-section-head">
                 <div>
