@@ -208,7 +208,11 @@ let state = {
   // Requester view layout: "cards" is the block/bar view, "table" the dense one. Persisted per
   // browser so the choice survives the version poller reloading the dataset.
   requesterLayout: localStorage.getItem("requesterLayout") === "table" ? "table" : "cards",
-  tablePage: 1
+  tablePage: 1,
+  requesterPage: 1,
+  requesterPageSize: Number(localStorage.getItem("requesterPageSize")) || 10,
+  requesterSelectedId: "",
+  requesterDetailCollapsed: localStorage.getItem("requesterDetailCollapsed") === "1"
 };
 
 const el = (id) => document.getElementById(id);
@@ -1305,42 +1309,121 @@ function renderRequesterCard(record) {
  * The dense alternative to the cards. Progress collapses to a compact bar plus the stage name, which
  * is what makes the table readable at twenty rows — the full segmented bar needs the card's width.
  */
+// 表格视图的列：只放最常扫的关键信息，详细字段留给左侧信息栏
+const REQUESTER_TABLE_COLUMNS = ["获取状态", "隶属部门", "PM", "需求提出时间", "期望交付日期"];
+
+// 左侧详细信息，按「是什么 → 谁负责 → 什么时候 → 附件」分组
+const REQUESTER_DETAIL_GROUPS = [
+  { title: "需求信息", fields: ["项目名称", "任务代码", "2026需求编码", "获取状态", "获取渠道"] },
+  { title: "归属与人员", fields: ["隶属部门", "需求负责人", "需求人", "关注人", "PM", "项目对接人", "解决方案负责人"] },
+  { title: "时间", fields: ["需求提出时间", "期望交付日期", "实际交付完成日期", "Sprint"] },
+  { title: "其他", fields: ["需求文档", "满意度", "满意度评价来源", "数据来源", "项目备注"] }
+];
+// 这些字段的值是可枚举的，用 chip 呈现比纯文本更容易扫
+const CHIP_FIELDS = new Set(["获取状态", "获取渠道", "隶属部门", "数据来源", "Sprint",
+  "需求负责人", "需求人", "关注人", "PM", "项目对接人", "解决方案负责人"]);
+const LONG_DETAIL_FIELDS = new Set(["项目备注", "需求描述", "阻塞项"]);
+const REQUESTER_PAGE_SIZE_OPTIONS = [10, 20, 50];
+
+/**
+ * 表格视图：左侧详细信息 + 右侧关键信息表格。
+ *
+ * 刻意不在这里放进度条 —— 进度条是方块条视图的核心可视化，表格视图要的是「一屏扫过尽量多条需求」，
+ * 每行塞一个分段条既挤又重复。点行切换左侧详情，把「详细」和「概览」分到两侧，
+ * 而不是让每一行同时承担两件事。
+ */
 function renderRequesterTable(records) {
-  const columns = REQUESTER_COLUMNS.filter((column) => column !== "项目名称" && column !== "获取状态");
+  const pageCount = Math.max(Math.ceil(records.length / state.requesterPageSize), 1);
+  const page = Math.min(Math.max(state.requesterPage, 1), pageCount);
+  state.requesterPage = page;
+  const start = (page - 1) * state.requesterPageSize;
+  const pageRecords = records.slice(start, start + state.requesterPageSize);
+
+  // 默认选中当前页第一条，避免左栏空着
+  const selected = records.find((record) => record.record_id === state.requesterSelectedId) || pageRecords[0];
+  state.requesterSelectedId = selected?.record_id || "";
+
   return `
-    <div class="table-wrap">
-      <table class="requester-table">
-        <thead>
-          <tr>
-            <th>项目名称</th>
-            <th>进度</th>
-            <th>获取状态</th>
-            ${columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("")}
-          </tr>
-        </thead>
-        <tbody>
-          ${records.map((record) => {
-            const detail = progressDetail(record);
-            const color = STAGE_COLORS[detail.stageKey] || "#94a3b8";
-            return `
+    <div class="detail-split ${state.requesterDetailCollapsed ? "collapsed" : ""}">
+      <aside class="detail-pane">
+        <div class="detail-pane-head">
+          <h3>详细信息</h3>
+          <button class="detail-collapse" type="button" data-toggle-detail
+            title="${state.requesterDetailCollapsed ? "展开详细信息" : "收起详细信息"}"
+            aria-label="${state.requesterDetailCollapsed ? "展开详细信息" : "收起详细信息"}">${state.requesterDetailCollapsed ? "›" : "‹"}</button>
+        </div>
+        <div class="detail-pane-body">${selected ? renderRequesterDetail(selected) : `<p class="detail-empty">选择左侧任意一条需求查看详情</p>`}</div>
+      </aside>
+      <div class="detail-main">
+        <div class="table-wrap">
+          <table class="requester-table">
+            <thead>
               <tr>
-                <td class="cell-title">${escapeHtml(cell(record, "项目名称") || "未命名需求")}</td>
-                <td class="cell-progress">
-                  <div class="row-progress" title="${escapeHtml(detail.measured ? `${detail.stageLabel} · ${detail.percent}%` : "无法量化")}">
-                    <div class="track"><div class="fill" style="width:${detail.measured ? detail.percent : 0}%;background:${color}"></div></div>
-                    <span>${detail.measured ? `${detail.percent}%` : "—"}</span>
-                  </div>
-                  <small>${escapeHtml(detail.measured ? detail.stageLabel : detail.outcome === "cancelled" ? "已取消" : "未设置")}</small>
-                </td>
-                <td><span class="badge ${statusGroup(cell(record, "获取状态"))}">${escapeHtml(statusLabel(cell(record, "获取状态")))}</span></td>
-                ${columns.map((column) => `<td>${renderFieldValue(column, cell(record, column))}</td>`).join("")}
+                <th>项目名称</th>
+                ${REQUESTER_TABLE_COLUMNS.map((column) => `<th>${escapeHtml(column)}</th>`).join("")}
               </tr>
-            `;
-          }).join("")}
-        </tbody>
-      </table>
+            </thead>
+            <tbody>
+              ${pageRecords.map((record) => {
+                const active = record.record_id === state.requesterSelectedId;
+                return `
+                  <tr class="${active ? "active" : ""}" data-select-requirement="${escapeHtml(record.record_id)}" tabindex="0">
+                    <td class="cell-title">${escapeHtml(cell(record, "项目名称") || "未命名需求")}</td>
+                    ${REQUESTER_TABLE_COLUMNS.map((column) => `<td>${column === "获取状态"
+                      ? `<span class="badge ${statusGroup(cell(record, "获取状态"))}">${escapeHtml(statusLabel(cell(record, "获取状态")))}</span>`
+                      : renderDetailValue(column, cell(record, column))}</td>`).join("")}
+                  </tr>
+                `;
+              }).join("")}
+            </tbody>
+          </table>
+        </div>
+        <div class="table-foot">
+          <span class="pager-label">共 ${records.length} 条</span>
+          <div class="pager-controls">
+            <button class="button mini" type="button" data-requester-page="${page - 1}" ${page === 1 ? "disabled" : ""}>‹</button>
+            <span class="pager-label">${page} / ${pageCount}</span>
+            <button class="button mini" type="button" data-requester-page="${page + 1}" ${page === pageCount ? "disabled" : ""}>›</button>
+            <select data-requester-page-size aria-label="每页条数">
+              ${REQUESTER_PAGE_SIZE_OPTIONS.map((size) => `<option value="${size}" ${size === state.requesterPageSize ? "selected" : ""}>${size} 条/页</option>`).join("")}
+            </select>
+          </div>
+        </div>
+      </div>
     </div>
   `;
+}
+
+function renderRequesterDetail(record) {
+  return REQUESTER_DETAIL_GROUPS.map((group) => {
+    const rows = group.fields
+      // 只跳过台账里根本没有的列；有列但值为空的仍然显示，用「-」表明「确实没有」而不是加载失败
+      .filter((field) => state.fields.some((item) => (item.name || item.id) === field))
+      .map((field) => `
+        <div class="detail-row">
+          <span class="detail-label">${escapeHtml(field)}</span>
+          <div class="detail-value">${renderDetailValue(field, cell(record, field))}</div>
+        </div>
+      `).join("");
+    return rows ? `<section class="detail-group"><h4>${escapeHtml(group.title)}</h4>${rows}</section>` : "";
+  }).join("");
+}
+
+/** 空值统一显示为「-」；人名、状态等可枚举值拆成 chip；长文本折叠。 */
+function renderDetailValue(field, value) {
+  const text = String(value || "").trim();
+  if (!text) return `<span class="detail-dash">-</span>`;
+  if (LINK_FIELDS.has(field) && /^https?:\/\//i.test(text)) {
+    return `<a href="${escapeHtml(text)}" target="_blank" rel="noopener noreferrer">打开链接 ↗</a>`;
+  }
+  if (CHIP_FIELDS.has(field)) {
+    const parts = text.split(/[、,，;；/／\n]+/).map((item) => item.trim()).filter(Boolean);
+    return parts.map((item) => `<span class="detail-chip">${escapeHtml(item)}</span>`).join("");
+  }
+  if (LONG_DETAIL_FIELDS.has(field) && text.length > 90) {
+    return `<span class="detail-long collapsed" data-expandable>${escapeHtml(text)}</span><button class="detail-expand" type="button" data-expand-detail>展开</button>`;
+  }
+  return escapeHtml(text);
 }
 
 function renderSatisfactionControl(record) {
@@ -2470,10 +2553,55 @@ el("recordPager").addEventListener("click", (event) => {
   // they did not ask for.
   el("records").scrollIntoView({ block: "start" });
 });
+el("requesterCards").addEventListener("click", (event) => {
+  const row = event.target.closest("tr[data-select-requirement]");
+  if (row) {
+    state.requesterSelectedId = row.dataset.selectRequirement;
+    renderRequesterView();
+    return;
+  }
+  const pageButton = event.target.closest("button[data-requester-page]");
+  if (pageButton && !pageButton.disabled) {
+    state.requesterPage = Number(pageButton.dataset.requesterPage) || 1;
+    renderRequesterView();
+    return;
+  }
+  if (event.target.closest("[data-toggle-detail]")) {
+    state.requesterDetailCollapsed = !state.requesterDetailCollapsed;
+    localStorage.setItem("requesterDetailCollapsed", state.requesterDetailCollapsed ? "1" : "0");
+    renderRequesterView();
+    return;
+  }
+  const expand = event.target.closest("[data-expand-detail]");
+  if (expand) {
+    // 就地展开，不重新渲染整个视图，否则会把折叠状态又打回去
+    const long = expand.previousElementSibling;
+    const collapsed = long?.classList.toggle("collapsed");
+    expand.textContent = collapsed ? "展开" : "收起";
+  }
+});
+el("requesterCards").addEventListener("change", (event) => {
+  const select = event.target.closest("select[data-requester-page-size]");
+  if (!select) return;
+  state.requesterPageSize = Number(select.value) || 10;
+  localStorage.setItem("requesterPageSize", String(state.requesterPageSize));
+  state.requesterPage = 1;
+  renderRequesterView();
+});
+// 键盘可达：表格行是 tabindex=0，回车/空格等同点击
+el("requesterCards").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const row = event.target.closest("tr[data-select-requirement]");
+  if (!row) return;
+  event.preventDefault();
+  state.requesterSelectedId = row.dataset.selectRequirement;
+  renderRequesterView();
+});
 el("requesterLayoutToggle").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-requester-layout]");
   if (!button || button.dataset.requesterLayout === state.requesterLayout) return;
   state.requesterLayout = button.dataset.requesterLayout;
+  state.requesterPage = 1;
   // Survives the version poller reloading the dataset, which otherwise re-renders from defaults.
   localStorage.setItem("requesterLayout", state.requesterLayout);
   renderRequesterView();

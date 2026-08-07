@@ -3006,3 +3006,194 @@ select {
   opacity: 0.45;
   cursor: not-allowed;
 }
+
+/* ── 需求方表格视图：左详情 + 右列表 ───────────────────────────────────────
+   参考数据资产页的主从布局。详细字段放左栏、关键信息留在表格里，
+   这样表格能一屏扫过更多条需求，而不必每行都塞满字段。
+   表格里刻意没有进度条 —— 那是方块条视图的可视化，两边重复既挤又无信息增量。 */
+.detail-split {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 16px;
+  margin-top: 14px;
+  align-items: start;
+}
+
+.detail-split.collapsed {
+  grid-template-columns: 44px minmax(0, 1fr);
+}
+
+.detail-pane {
+  position: sticky;
+  top: 76px;
+  max-height: calc(100vh - 110px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfd;
+  overflow: hidden;
+}
+
+.detail-pane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+  background: #fff;
+}
+
+.detail-pane-head h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.detail-split.collapsed .detail-pane-head h3,
+.detail-split.collapsed .detail-pane-body {
+  display: none;
+}
+
+.detail-collapse {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: #fff;
+  color: var(--muted);
+  cursor: pointer;
+  line-height: 1;
+}
+
+.detail-collapse:hover {
+  border-color: var(--brand);
+  color: var(--brand);
+}
+
+.detail-pane-body {
+  padding: 4px 14px 14px;
+  overflow-y: auto;
+}
+
+.detail-group {
+  padding-top: 12px;
+}
+
+.detail-group h4 {
+  margin: 0 0 8px;
+  color: var(--brand);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.detail-row {
+  display: grid;
+  gap: 3px;
+  padding: 7px 0;
+  border-top: 1px solid rgba(221, 227, 234, 0.7);
+}
+
+.detail-label {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.detail-value {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* 空值显示「-」而不是留白：留白看起来像没加载出来 */
+.detail-dash {
+  color: #b6c0cb;
+}
+
+.detail-chip {
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  font-size: 12px;
+}
+
+.detail-long.collapsed {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.detail-expand {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--brand);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.detail-empty {
+  padding: 16px 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.detail-main {
+  min-width: 0;
+}
+
+.requester-table tbody tr[data-select-requirement] {
+  cursor: pointer;
+}
+
+.requester-table tbody tr[data-select-requirement]:hover {
+  background: #f5f9fb;
+}
+
+.requester-table tbody tr.active {
+  background: #eaf2f4;
+  box-shadow: inset 3px 0 0 var(--brand);
+}
+
+.table-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 10px;
+}
+
+.pager-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.pager-controls select {
+  min-height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  font-size: 13px;
+}
+
+@media (max-width: 980px) {
+  .detail-split,
+  .detail-split.collapsed {
+    grid-template-columns: 1fr;
+  }
+
+  .detail-pane {
+    position: static;
+    max-height: none;
+  }
+}
