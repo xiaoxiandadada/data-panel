@@ -17,6 +17,7 @@ import { LarkBaseSyncService } from "../dist/server/sync/lark-base-sync.service.
 import { LedgerController } from "../dist/server/ledger/ledger.controller.js";
 import { LarkNotificationService } from "../dist/server/notifications/lark-notification.service.js";
 import { ApiKeyService, hashApiKey } from "../dist/server/api/api-key.service.js";
+import { SnapshotService } from "../dist/server/infra/snapshot.service.js";
 
 function dataset(rows) {
   const names = [...new Set(rows.flatMap((row) => Object.keys(row)))];
@@ -1713,4 +1714,63 @@ test("合并结果里未变化的记录不会进入 changed", async () => {
   // 只有 Beta 变了
   assert.deepEqual(merged.changed.map((record) => record.fields["任务代码"]), ["TK0002"]);
   assert.equal(merged.changed[0].fields["获取状态"], "待结算");
+});
+
+function withOssEnvironment(overrides, callback) {
+  const keys = ["OSS_ACCESS_KEY_ID", "OSS_ACCESS_KEY_SECRET", "OSS_BUCKET", "OSS_ENDPOINT", "OSS_PREFIX"];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  for (const key of keys) delete process.env[key];
+  Object.assign(process.env, overrides);
+  try {
+    return callback(new SnapshotService());
+  } finally {
+    for (const key of keys) {
+      if (previous[key] == null) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+}
+
+test("未配置对象存储时快照静默跳过，不阻塞写入", async () => {
+  // 这是刻意的：备份是安全网，安全网不可用不该让本来合法的写入失败。
+  const result = await withOssEnvironment({}, async (service) => {
+    assert.equal(service.isConfigured(), false);
+    return service.capture("test", [{ record_id: "1", fields: {} }]);
+  });
+  assert.equal(result, null);
+});
+
+test("对象存储配置齐全才算启用", () => {
+  const full = { OSS_ACCESS_KEY_ID: "ak", OSS_ACCESS_KEY_SECRET: "sk", OSS_BUCKET: "b", OSS_ENDPOINT: "oss-cn-shanghai.aliyuncs.com" };
+  withOssEnvironment(full, (service) => assert.equal(service.isConfigured(), true));
+  // 缺任何一项都不算启用，避免半配置状态下以为有备份其实没有
+  for (const missing of Object.keys(full)) {
+    const partial = { ...full };
+    delete partial[missing];
+    withOssEnvironment(partial, (service) => assert.equal(service.isConfigured(), false, `缺 ${missing} 时不应算启用`));
+  }
+});
+
+test("describe() 只报桶名与 endpoint，绝不泄露密钥", () => {
+  withOssEnvironment({
+    OSS_ACCESS_KEY_ID: "LTAI-should-never-appear",
+    OSS_ACCESS_KEY_SECRET: "secret-should-never-appear",
+    OSS_BUCKET: "my-bucket",
+    OSS_ENDPOINT: "https://oss-cn-shanghai.aliyuncs.com/"
+  }, (service) => {
+    const described = JSON.stringify(service.describe());
+    assert.equal(described.includes("should-never-appear"), false, "describe() 泄露了密钥");
+    assert.equal(described.includes("my-bucket"), true);
+    // endpoint 的协议与尾部斜杠会被剥掉，否则拼出来的 host 会带上 https:// 前缀
+    assert.equal(service.describe().endpoint, "oss-cn-shanghai.aliyuncs.com");
+  });
+});
+
+test("快照前缀可配置，默认落在 data-panel/snapshots 下", () => {
+  const base = { OSS_ACCESS_KEY_ID: "ak", OSS_ACCESS_KEY_SECRET: "sk", OSS_BUCKET: "b", OSS_ENDPOINT: "e.com" };
+  withOssEnvironment(base, (service) => assert.equal(service.describe().target, "oss://b/data-panel/snapshots"));
+  withOssEnvironment({ ...base, OSS_PREFIX: "/custom/path/" }, (service) => {
+    // 前后斜杠都剥掉，否则会拼出 oss://b//custom/path//xxx 这样的双斜杠对象名
+    assert.equal(service.describe().target, "oss://b/custom/path");
+  });
 });

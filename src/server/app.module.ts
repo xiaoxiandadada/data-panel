@@ -4,6 +4,7 @@ import { ApiKeyAdminController, PublicApiController } from "./api/public-api.con
 import { AuthService } from "./auth/auth.service.js";
 import { LarkOAuthService } from "./auth/lark-oauth.service.js";
 import { LedgerStoreService } from "./infra/ledger-store.service.js";
+import { SnapshotService } from "./infra/snapshot.service.js";
 import { QueueService } from "./infra/queue.service.js";
 import { LedgerController } from "./ledger/ledger.controller.js";
 import { LarkNotificationService } from "./notifications/lark-notification.service.js";
@@ -20,6 +21,7 @@ import { LarkBaseSyncService } from "./sync/lark-base-sync.service.js";
     AuthService,
     LarkOAuthService,
     LedgerStoreService,
+    SnapshotService,
     LarkNotificationService,
     QueueService,
     DeliveryEfficiencyService,

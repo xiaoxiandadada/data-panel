@@ -8,6 +8,7 @@ import type { ApiKeyRecord, AppUser, Dataset, ImportBatch, LedgerLog, LedgerReco
 import type { FieldValue } from "../core/types.js";
 import { ensureFields, importBusinessKey, nextRecordId, normalizeBaseFieldValues, rowsToDataset, stringifyCell } from "../core/ledger-utils.js";
 import { mergeAdministrativeRoles, normalizeUserRoles, primaryUserRole } from "../core/user-roles.js";
+import { SnapshotService } from "./snapshot.service.js";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const dataDir = resolve(process.env.DATA_DIR || resolve(root, "data"));
@@ -55,6 +56,8 @@ export class LedgerStoreService implements OnModuleInit {
   private db: Db | null = null;
   private mongoReady = false;
   private fileDataVersion = 0;
+
+  constructor(private readonly snapshots: SnapshotService) {}
 
   async onModuleInit() {
     const mongoUri = this.mongoUri();
@@ -153,8 +156,26 @@ export class LedgerStoreService implements OnModuleInit {
     return existsSync(dataPath) ? JSON.parse(readFileSync(dataPath, "utf8")) as Dataset : rowsToDataset([], "");
   }
 
+  /**
+   * Replaces the entire ledger. Destructive: `deleteMany({})` then `insertMany(...)`.
+   *
+   * Guarded, because this is the operation that already lost records once. Two layers before the
+   * delete:
+   *
+   * 1. **Snapshot.** The current records are uploaded to object storage first, so a mistake is
+   *    recoverable. There is no database backup policy on dev or prod, so this is the only copy.
+   * 2. **Refusal.** A replace that would drop most of the ledger is almost certainly a bug rather than
+   *    an intention, and refusing it is strictly better than making it recoverable — nobody has to
+   *    notice, diagnose and restore. Set `LEDGER_ALLOW_BULK_DELETE=true` for the rare legitimate case
+   *    (deliberately re-importing a much smaller dataset).
+   *
+   * Growing the ledger, seeding an empty one, and small shrinkages all pass untouched.
+   */
   async saveDataset(dataset: Dataset): Promise<void> {
     if (this.mongoReady && this.db) {
+      const incoming = (dataset.records || []).length;
+      const current = await this.ledgerRecords().countDocuments();
+      await this.guardBulkReplace(current, incoming);
       await this.appState().bulkWrite([
         {
           updateOne: {
@@ -186,6 +207,37 @@ export class LedgerStoreService implements OnModuleInit {
     mkdirSync(dataDir, { recursive: true });
     writeFileSync(dataPath, `${JSON.stringify(dataset, null, 2)}\n`, "utf8");
     await this.bumpDataVersion();
+  }
+
+  /**
+   * Snapshots before a shrinking replace, and refuses one that would drop most of the ledger.
+   *
+   * The thresholds are deliberately loose: `writeChangedRecords` handles the normal sync and import
+   * paths now, so a shrinking full replace should be rare. Losing a handful of records can be a genuine
+   * source-table deletion; losing more than half of several thousand cannot.
+   */
+  private async guardBulkReplace(current: number, incoming: number): Promise<void> {
+    const removed = current - incoming;
+    if (current === 0 || removed <= 0) return;
+
+    const snapshot = this.snapshots.isConfigured()
+      ? await this.snapshots.capture(`replace-${current}-to-${incoming}`, (await this.readDataset()).records || [])
+      : null;
+
+    const catastrophic = removed > 100 && incoming < current * 0.5;
+    if (!catastrophic) {
+      console.warn(`Ledger replace shrinks the collection: ${current} → ${incoming} (-${removed})${snapshot ? `, snapshot ${snapshot.key}` : ""}`);
+      return;
+    }
+    if (String(process.env.LEDGER_ALLOW_BULK_DELETE || "").trim().toLowerCase() === "true") {
+      console.warn(`Ledger bulk delete allowed by LEDGER_ALLOW_BULK_DELETE: ${current} → ${incoming}${snapshot ? `, snapshot ${snapshot.key}` : ""}`);
+      return;
+    }
+    throw new Error(
+      `拒绝执行：本次写入会把台账从 ${current} 条降到 ${incoming} 条（删除 ${removed} 条）。`
+      + `${snapshot ? `已备份到 ${snapshot.key}。` : this.snapshots.isConfigured() ? "备份失败，未执行删除。" : "未配置对象存储，无备份，未执行删除。"}`
+      + "如确认这是预期行为，设置 LEDGER_ALLOW_BULK_DELETE=true 后重试。"
+    );
   }
 
   /**
