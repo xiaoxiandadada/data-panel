@@ -86,11 +86,17 @@ const lines = [
   "",
   supplied.mongo
     ? `MONGODB_URI: "${supplied.mongo}"`
-    : `MONGODB_URI: "${PLACEHOLDER}：prod 独立实例，形如 mongodb://用户:密码@主机:27017/delivery_pipeline?authSource=admin"`,
-  "MONGODB_DB: \"delivery_pipeline\"",
+    : `MONGODB_URI: "${PLACEHOLDER}：可沿用 dev values.yaml 里的同一条连接串，但下面的 MONGODB_DB 必须换名"`,
+  // 共用实例是安全的，因为库名可独立指定：ledger-store 用 client.db(MONGODB_DB)。
+  // 但库名若不换，prod 会直接写进 dev 的台账 —— 这是唯一不能照抄的地方。
+  "MONGODB_DB: \"delivery_pipeline_prod\"  # 沿用 dev 的 MONGODB_URI 时，必须靠这个库名与 dev 隔离",
   supplied.redis
     ? `REDIS_URL: "${supplied.redis}"`
-    : `REDIS_URL: "${PLACEHOLDER}：prod 独立实例，形如 redis://主机:6379"`,
+    : `REDIS_URL: "${PLACEHOLDER}：可沿用 dev 的地址，但结尾必须加库号，例如 redis://主机:6379/1（dev 用默认 0）"`,
+  // 队列键名在 queue.service.ts 里是硬编码的（delivery-pipeline:events 等），
+  // 所以同一个 Redis 库会让 dev 与 prod 互相抢事件 —— brpoplpush 先弹到的一方赢，
+  // 事件会被对方消费掉，甚至发出本不该发的飞书通知。
+  // 已实测：URL 结尾加 /1 后两边队列互不可见（ioredis 把路径解析为库号）。
   "",
   "# 与 dev 相同的飞书应用",
   `LARK_APP_ID: "${env.LARK_APP_ID || `${PLACEHOLDER}（本地 .env 未找到）`}"`,
