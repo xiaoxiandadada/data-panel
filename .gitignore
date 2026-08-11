@@ -14,3 +14,8 @@ data/
 .vscode/
 coverage/
 .tmp/
+
+# .env 的各种手工副本。只写 .env 是不够的：曾经有一个 .env.bak.20260729 落在仓库里，
+# 里面是同一份真实密钥，而它不匹配任何既有规则。
+.env.*
+!.env.example

@@ -59,9 +59,9 @@ services:
       LARK_WEBHOOK_URL: ${LARK_WEBHOOK_URL:-}
       LARK_SUPER_ADMIN_OPEN_IDS: ${LARK_SUPER_ADMIN_OPEN_IDS:-}
       LARK_SUPER_ADMIN_EMAILS: ${LARK_SUPER_ADMIN_EMAILS:-}
-      LARK_DELIVERY_ADMIN_OPEN_IDS: ${LARK_DELIVERY_ADMIN_OPEN_IDS:-}
-      LARK_DELIVERY_ADMIN_EMAILS: ${LARK_DELIVERY_ADMIN_EMAILS:-}
-      LARK_DELIVERY_ADMIN_NAMES: ${LARK_DELIVERY_ADMIN_NAMES:-}
+      # 交付管理员没有对应的环境变量：由超级管理员在「管理员设置」里从飞书通讯录任命，
+      # 存进 app_users 集合。曾经有 LARK_DELIVERY_ADMIN_* 三个变量，代码早已不再读取，
+      # 留着只会让人以为填了就生效。
     volumes:
       - ./data:/app/data
     depends_on:

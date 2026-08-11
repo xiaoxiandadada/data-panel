@@ -205,6 +205,8 @@ let state = {
   efficiency: null,
   efficiencyLoading: false,
   progressModel: null,
+  // 九份阶段梯（未设置 + 八个阶段），随 progressModel 一起建好，见 buildStageLadders
+  progressLadders: [],
   // Requester view layout: "cards" is the block/bar view, "table" the dense one. Persisted per
   // browser so the choice survives the version poller reloading the dataset.
   requesterLayout: localStorage.getItem("requesterLayout") === "table" ? "table" : "cards",
@@ -354,7 +356,7 @@ function progressDetail(record) {
     return {
       ...supplied,
       measured: supplied.countsTowardAverage,
-      stages: stageLadder(model, supplied.stageIndex)
+      stages: stageLadder(supplied.stageIndex)
     };
   }
   const status = statusLabel(cell(record, "获取状态"));
@@ -369,7 +371,7 @@ function progressDetail(record) {
     evidenceFilled: 0,
     evidenceTotal: 0,
     flags: [],
-    stages: stageLadder(model, -1)
+    stages: stageLadder(-1)
   });
   if (!model || !status || status === "未设置") return unmeasured("unknown");
   const key = normalizeText(status);
@@ -402,32 +404,33 @@ function progressDetail(record) {
     evidenceFilled: filled,
     evidenceTotal: evidence.length,
     flags,
-    stages: stageLadder(model, index)
+    stages: stageLadder(index)
   };
 }
 
 // Rebuilt from the model rather than sent per record: the ladder is identical for every requirement at
 // the same stage, and shipping it inline would add 55k redundant objects to an admin payload.
 //
-// Memoized on stageIndex because there are only nine distinct answers (-1 plus the eight stages) while
-// `progressDetail` runs once per record in the admin view and up to three times per record in the
-// requester card view. Every consumer only reads from the result, so sharing one array is safe.
-let stageLadderCache = new Map();
-let stageLadderSource = null;
+// There are only nine distinct answers (未设置 plus the eight stages) and the model arrives exactly once
+// per page, so all nine are built with it rather than per record: `progressDetail` runs once per record
+// in the admin view and up to three times per record in the requester card view, which used to mean
+// ~50k throwaway objects per render. Frozen because every record shares one array and only reads it.
+const EMPTY_LADDER = Object.freeze([]);
 
-function stageLadder(model, currentIndex) {
-  if (stageLadderSource !== model) {
-    stageLadderSource = model;
-    stageLadderCache = new Map();
-  }
-  const cached = stageLadderCache.get(currentIndex);
-  if (cached) return cached;
-  const ladder = (model?.stages || []).map((stage, index) => ({
-    ...stage,
-    state: index < currentIndex ? "done" : index === currentIndex ? "current" : "todo"
-  }));
-  stageLadderCache.set(currentIndex, ladder);
-  return ladder;
+function buildStageLadders(model) {
+  const stages = model?.stages || [];
+  // 下标 = currentIndex + 1，所以下标 0 是「未设置」(currentIndex = -1)，之后每个阶段一份
+  return Array.from({ length: stages.length + 1 }, (_, slot) => {
+    const currentIndex = slot - 1;
+    return Object.freeze(stages.map((stage, index) => Object.freeze({
+      ...stage,
+      state: index < currentIndex ? "done" : index === currentIndex ? "current" : "todo"
+    })));
+  });
+}
+
+function stageLadder(currentIndex) {
+  return state.progressLadders[currentIndex + 1] || EMPTY_LADDER;
 }
 
 /**
@@ -1409,19 +1412,34 @@ function renderRequesterTable(records) {
   `;
 }
 
+/**
+ * 详情分组渲染，需求方详情栏和管理端弹窗共用一份实现 —— 「同一个字段在两处长得一样」这件事
+ * 靠共用渲染器保证，而不是靠两段模板手工保持同步。返回字段数，调用方要显示「N 项」。
+ */
+function renderDetailGroups(record, groups) {
+  const known = new Set(state.fields.map((field) => field.name || field.id));
+  const resolved = groups
+    // 只跳过台账里根本没有的列；有列但值为空的仍然显示，用「-」表明「确实没有」而不是加载失败
+    .map((group) => ({ title: group.title, fields: group.fields.filter((field) => known.has(field)) }))
+    .filter((group) => group.fields.length);
+  return {
+    count: resolved.reduce((sum, group) => sum + group.fields.length, 0),
+    html: resolved.map((group) => `
+      <section class="detail-group">
+        <h4>${escapeHtml(group.title)}</h4>
+        ${group.fields.map((field) => `
+          <div class="detail-row">
+            <span class="detail-label">${escapeHtml(field)}</span>
+            <div class="detail-value">${renderDetailValue(field, cell(record, field))}</div>
+          </div>
+        `).join("")}
+      </section>
+    `).join("")
+  };
+}
+
 function renderRequesterDetail(record) {
-  return REQUESTER_DETAIL_GROUPS.map((group) => {
-    const rows = group.fields
-      // 只跳过台账里根本没有的列；有列但值为空的仍然显示，用「-」表明「确实没有」而不是加载失败
-      .filter((field) => state.fields.some((item) => (item.name || item.id) === field))
-      .map((field) => `
-        <div class="detail-row">
-          <span class="detail-label">${escapeHtml(field)}</span>
-          <div class="detail-value">${renderDetailValue(field, cell(record, field))}</div>
-        </div>
-      `).join("");
-    return rows ? `<section class="detail-group"><h4>${escapeHtml(group.title)}</h4>${rows}</section>` : "";
-  }).join("");
+  return renderDetailGroups(record, REQUESTER_DETAIL_GROUPS).html;
 }
 
 /** 空值统一显示为「-」；人名、状态等可枚举值拆成 chip；长文本折叠。 */
@@ -1629,6 +1647,7 @@ async function loadProgressModel() {
     // Progress bars degrade to "未设置" rather than to a second, divergent copy of the status table.
     state.progressModel = null;
   }
+  state.progressLadders = buildStageLadders(state.progressModel);
 }
 
 async function loadFieldPreferences() {
@@ -2436,34 +2455,22 @@ const ADMIN_DETAIL_GROUPS = [
   { title: "商务", fields: ["预算金额", "预算归口", "结算金额", "结算完成时间", "专项归口"] },
   { title: "风险", fields: ["阻塞项", "需求异常原因", "交付异常原因"] }
 ];
+const ADMIN_CLAIMED_FIELDS = new Set(ADMIN_DETAIL_GROUPS.flatMap((group) => group.fields));
 
 function renderAdminDetailFields(record) {
-  const claimed = new Set(ADMIN_DETAIL_GROUPS.flatMap((group) => group.fields));
-  const known = state.fields.map((field) => field.name || field.id);
   const groups = [
     ...ADMIN_DETAIL_GROUPS,
     // 兜底组：只收「有值」的剩余列，否则 100 多个空列会把弹窗撑成一堵墙
-    { title: "其他字段", fields: known.filter((field) => !claimed.has(field) && cell(record, field).trim()) }
+    {
+      title: "其他字段",
+      fields: state.fields
+        .map((field) => field.name || field.id)
+        .filter((field) => !ADMIN_CLAIMED_FIELDS.has(field) && cell(record, field).trim())
+    }
   ];
-  let shown = 0;
-  const html = groups.map((group) => {
-    const fields = group.fields.filter((field) => known.includes(field));
-    if (!fields.length) return "";
-    shown += fields.length;
-    return `
-      <section class="detail-group">
-        <h4>${escapeHtml(group.title)}</h4>
-        ${fields.map((field) => `
-          <div class="detail-row">
-            <span class="detail-label">${escapeHtml(field)}</span>
-            <div class="detail-value">${renderDetailValue(field, cell(record, field))}</div>
-          </div>
-        `).join("")}
-      </section>
-    `;
-  }).join("");
+  const { html, count } = renderDetailGroups(record, groups);
   el("detailFieldList").innerHTML = html || `<div class="empty compact">没有可展示的字段</div>`;
-  el("detailFieldCount").textContent = `${shown} 项`;
+  el("detailFieldCount").textContent = `${count} 项`;
 }
 
 async function openDetailDialog(record) {
@@ -2992,17 +2999,43 @@ el("adminForm").addEventListener("submit", async (event) => {
 const VERSION_POLL_MS = 3000;
 let knownDataVersion = null;
 let versionPollTimer = null;
-// Guards against a second tick starting while the first is still downloading and re-rendering.
-// `knownDataVersion` used to be assigned only after `await loadData()`, so a tick landing during a
-// slow reload still saw the old version and launched a concurrent `loadData()` — under sustained Base
-// edits those compounded. A flag rather than assigning early, so a failed reload is still retried.
-let reloadInFlight = false;
+// Guards against a second tick starting while the first is still checking, downloading and
+// re-rendering. `knownDataVersion` used to be assigned only after `await loadData()`, so a tick
+// landing during a slow reload still saw the old version and launched a concurrent `loadData()` —
+// under sustained Base edits those compounded. A flag rather than assigning early, so a failed
+// reload is still retried.
+let pollInFlight = false;
+
+// 自动刷新不该把页面从读者眼下挪走，但整块 innerHTML 替换会重建滚动容器、把偏移量清零。
+// 管理端横向滚动在 #records 上，需求方两个容器都在 #requesterCards 里且会被整体重建，
+// 所以按选择器记录偏移量、渲染完再按同一个选择器找回节点写回去。纵向位置在 window 上：
+// .table-wrap 只有 overflow-x，它的 scrollTop 恒为 0。
+const SCROLL_ANCHORS = ["#records", "#requesterCards .table-wrap", "#requesterCards .detail-pane-body"];
+
+function captureScroll() {
+  const pageScroll = window.scrollY;
+  const offsets = SCROLL_ANCHORS.map((selector) => {
+    const node = document.querySelector(selector);
+    return node && (node.scrollTop || node.scrollLeft)
+      ? { selector, top: node.scrollTop, left: node.scrollLeft }
+      : null;
+  }).filter(Boolean);
+  return () => {
+    for (const { selector, top, left } of offsets) {
+      const node = document.querySelector(selector);
+      if (!node) continue;
+      node.scrollTop = top;
+      node.scrollLeft = left;
+    }
+    window.scrollTo({ top: pageScroll });
+  };
+}
 
 async function pollDataVersion() {
-  if (document.hidden) return;
+  if (document.hidden || pollInFlight) return;
   // Never swap the table out from under an open dialog.
   if (document.querySelector("dialog[open]")) return;
-  if (reloadInFlight) return;
+  pollInFlight = true;
   try {
     const result = await fetchJson(`./api/data/version?t=${Date.now()}`);
     const version = Number(result?.version || 0);
@@ -3011,28 +3044,14 @@ async function pollDataVersion() {
       return;
     }
     if (version === knownDataVersion) return;
-    reloadInFlight = true;
-    // An automatic refresh should not move the page under the reader. innerHTML replacement resets
-    // scroll, so the position is captured and restored around it.
-    const scroller = el("records");
-    const scrollTop = scroller?.scrollTop || 0;
-    const scrollLeft = scroller?.scrollLeft || 0;
-    const pageScroll = window.scrollY;
-    try {
-      await loadData();
-      knownDataVersion = version;
-      const restored = el("records");
-      if (restored) {
-        restored.scrollTop = scrollTop;
-        restored.scrollLeft = scrollLeft;
-      }
-      window.scrollTo({ top: pageScroll });
-    } finally {
-      reloadInFlight = false;
-    }
+    const restoreScroll = captureScroll();
+    await loadData();
+    knownDataVersion = version;
+    restoreScroll();
   } catch {
     // Backend restarting or offline: keep the current data and retry on the next tick.
-    reloadInFlight = false;
+  } finally {
+    pollInFlight = false;
   }
 }
 
