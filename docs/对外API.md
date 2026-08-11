@@ -139,7 +139,7 @@ curl -s -G -H "Authorization: Bearer $KEY" \
       "id": "import-1",
       "taskCode": "TK0001",
       "demandCode": null,
-      "name": "缅甸语视频采集",
+      "name": "示例语料采集需求",
       "status": "数据采集中",
       "progress": {
         "percent": 69,
@@ -152,7 +152,7 @@ curl -s -G -H "Authorization: Bearer $KEY" \
         "flags": []
       },
       "pms": ["张三", "李四"],
-      "fields": { "项目名称": "缅甸语视频采集", "获取状态": "数据采集中", "PM": "张三、李四" }
+      "fields": { "项目名称": "示例语料采集需求", "获取状态": "数据采集中", "PM": "张三、李四" }
     }
   ]
 }

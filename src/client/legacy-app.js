@@ -457,9 +457,6 @@ function progressSummary(records) {
   };
 }
 
-function averageProgress(records) {
-  return progressSummary(records).averagePercent;
-}
 
 function renderRequesterOptions(selectId) {
   const target = el(selectId);
@@ -481,7 +478,9 @@ function renderRequesterNameOptions() {
 
 function defaultRequesterName() {
   const mock = state.mockUsers.find((user) => user.role === "requester")?.name;
-  return state.requesters.includes("王冠楚") ? "王冠楚" : mock || state.requesters[0] || "王冠楚";
+  // 不再把某个具体的人写死成默认值：谁是默认需求方取决于当前登录身份和台账内容，
+  // 硬编码一个姓名既会在别人的环境里选错人，也把真实姓名带进了仓库。
+  return mock || state.requesters[0] || "";
 }
 
 function renderMeta(meta) {
@@ -644,26 +643,6 @@ function formOptions(fieldName) {
     .slice(0, 120);
 }
 
-function renderFilters() {
-  el("filterGrid").innerHTML = FILTER_FIELDS.map((field) => {
-    const options = uniqueValues(field);
-    return `
-      <label class="filter-control">
-        <span>${escapeHtml(field)}</span>
-        <select data-filter-field="${escapeHtml(field)}">
-          <option value="">全部</option>
-          ${options.map((value) => `<option value="${escapeHtml(value)}" ${state.filters[field] === value ? "selected" : ""}>${escapeHtml(value)}</option>`).join("")}
-        </select>
-      </label>
-    `;
-  }).join("");
-
-  const active = Object.entries(state.filters).filter(([, value]) => value);
-  el("activeFilters").innerHTML = active.length ? `
-    ${active.map(([field, value]) => `<button class="chip" type="button" data-clear-filter="${escapeHtml(field)}">${escapeHtml(field)}：${escapeHtml(value)} ×</button>`).join("")}
-    <button class="chip clear" type="button" id="clearAllFilters">清空筛选</button>
-  ` : "";
-}
 
 function matchesQuery(record, query) {
   const normalized = normalizeText(query);
@@ -950,16 +929,6 @@ async function applyQuery(query) {
   renderWorkspace();
 }
 
-function renderSearchHint(records) {
-  if (!state.query) {
-    el("projectSearchHint").textContent = state.adminMode
-      ? "可按项目名称、任务代码、负责人、项目对接人、部门、状态等信息查询"
-      : "可按项目名称、任务代码、负责人、项目对接人、部门、状态等信息查询";
-    return;
-  }
-  const prefix = state.adminMode ? "全局查询" : "查询";
-  el("projectSearchHint").textContent = `${prefix}“${state.query}”，匹配 ${records.length} 条记录`;
-}
 
 function renderHeaderCell(column, columns = []) {
   const pin = pinnedColumnPresentation(column, columns);
@@ -2200,7 +2169,7 @@ function openRequesterAuthDialog(mode) {
   el("requesterAuthTitle").textContent = isRegister ? "需求方注册" : "需求方登录";
   el("requesterAuthHint").textContent = isRegister
     ? "本地演示会创建一个模拟需求方身份，注册后可提交并查看自己的需求"
-    : "本地演示可用已有姓名登录，例如王冠楚";
+    : "本地演示可用台账中已有的姓名登录";
   el("requesterAuthSubmit").textContent = isRegister ? "注册并进入" : "登录";
   el("requesterAuthName").value = isRegister ? "" : defaultRequesterName();
   el("requesterAuthDepartment").value = "";

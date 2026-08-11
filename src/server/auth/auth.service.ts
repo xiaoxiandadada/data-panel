@@ -44,8 +44,8 @@ export class AuthService {
   }
 
   private readonly mockUsers: AppUser[] = [
-    { openId: "mock_wang-guanchu", name: "王冠楚", email: "wangguanchu@example.local", department: "安全可信AGI", role: "requester", roles: ["requester"], requesterRegistered: true },
-    { openId: "mock_gu-yuying", name: "顾语莺", email: "guyuying@example.local", department: "数据平台中心", role: "delivery_admin", roles: ["delivery_admin"], requesterRegistered: false },
+    { openId: "mock_requester", name: "需求方甲", email: "requester@example.local", department: "示例部门", role: "requester", roles: ["requester"], requesterRegistered: true },
+    { openId: "mock_delivery-admin", name: "交付管理员乙", email: "delivery-admin@example.local", department: "数据平台中心", role: "delivery_admin", roles: ["delivery_admin"], requesterRegistered: false },
     { openId: "mock_super-admin", name: "超级管理员", email: "super@example.local", department: "管理", role: "super_admin", roles: ["super_admin"], requesterRegistered: false }
   ];
 

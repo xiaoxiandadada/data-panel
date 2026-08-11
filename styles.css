@@ -1074,39 +1074,6 @@ body.admin-mode .admin-command-bar.admin-only {
   min-width: 150px;
 }
 
-.row-progress {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-
-.row-progress .track {
-  flex: 1;
-  min-width: 60px;
-  height: 6px;
-  border-radius: 999px;
-  background: #e6ebf0;
-  overflow: hidden;
-}
-
-.row-progress .fill {
-  height: 100%;
-  border-radius: 999px;
-}
-
-.row-progress span {
-  min-width: 34px;
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-}
-
-.cell-progress small {
-  display: block;
-  margin-top: 4px;
-  color: var(--muted);
-  font-size: 11px;
-}
-
 .requester-card-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

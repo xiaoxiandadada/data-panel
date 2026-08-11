@@ -136,16 +136,16 @@ test("date-only Feishu fields keep their calendar day instead of shifting back o
 
 test("source field aliases translate table-specific columns without discarding the original", () => {
   const aliased = applySourceFieldAliases("pool", {
-    "需求描述": "语音语料采集",
+    "需求描述": "示例语音采集需求",
     "需求方": "张三",
     "进展状态": "需求澄清中"
   });
   // The canonical column is what the business key and the requester view read.
-  assert.equal(aliased["项目名称"], "语音语料采集");
+  assert.equal(aliased["项目名称"], "示例语音采集需求");
   assert.equal(aliased["需求人"], "张三");
   assert.equal(aliased["获取状态"], "需求澄清中");
   // The source column stays so nothing that was visible in Feishu disappears from the ledger.
-  assert.equal(aliased["需求描述"], "语音语料采集");
+  assert.equal(aliased["需求描述"], "示例语音采集需求");
 });
 
 test("an alias never overwrites a canonical value the record already carries", () => {
@@ -166,13 +166,13 @@ test("待澄清项目 rows arrive with 需求澄清中 rather than an empty stat
   // The table has no status column at all, so without a default its rows land under 未设置 and
   // vanish from every stage view.
   const aliased = applySourceFieldAliases("clarify", {
-    "需求名称": "缅甸语视频采集",
-    "需求方": "王尔灿",
+    "需求名称": "示例语料采集需求",
+    "需求方": "需求方丙",
     "需求部门": "数据部",
     "需求类型": "内部采集"
   });
-  assert.equal(aliased["项目名称"], "缅甸语视频采集");
-  assert.equal(aliased["需求人"], "王尔灿");
+  assert.equal(aliased["项目名称"], "示例语料采集需求");
+  assert.equal(aliased["需求人"], "需求方丙");
   assert.equal(aliased["隶属部门"], "数据部");
   // 需求类型 only ever holds 内部采集 / 外部采集 / 外部采购, which is the 获取渠道 vocabulary.
   assert.equal(aliased["获取渠道"], "内部采集");
@@ -229,10 +229,10 @@ test("administrator and requester capabilities are assigned independently", () =
 
 test("every delivery administrator receives the complete ledger dataset", () => {
   const source = dataset([
-    { "项目名称": "甲", "项目对接人": "顾语莺" },
+    { "项目名称": "甲", "项目对接人": "交付管理员乙" },
     { "项目名称": "乙", "项目对接人": "其他管理员" }
   ]);
-  const admin = { openId: "ou_admin", name: "顾语莺", role: "delivery_admin", roles: ["delivery_admin"] };
+  const admin = { openId: "ou_admin", name: "交付管理员乙", role: "delivery_admin", roles: ["delivery_admin"] };
   assert.deepEqual(projectDatasetForAdmin(source, admin).records.map((record) => record.fields["项目名称"]), ["甲", "乙"]);
 });
 
@@ -962,11 +962,11 @@ test("status bot notifies requesters and assigned administrators only", async ()
         "项目名称": "Alpha",
         "获取状态": "已完结",
         "需求人": "需求方甲",
-        "项目对接人": "顾语莺、普通协作人"
+        "项目对接人": "交付管理员乙、普通协作人"
       }]),
       findUsersByNames: async () => [
         { openId: "ou_requester", name: "需求方甲", role: "requester", roles: ["requester"] },
-        { openId: "ou_admin", name: "顾语莺", role: "delivery_admin", roles: ["delivery_admin"] },
+        { openId: "ou_admin", name: "交付管理员乙", role: "delivery_admin", roles: ["delivery_admin"] },
         { openId: "ou_collaborator", name: "普通协作人", role: "requester", roles: ["requester"] }
       ],
       appendNotificationLog: async (log) => { logs.push(log); }
@@ -1133,7 +1133,7 @@ test("Feishu administrator search uses tenant contact directory APIs", async () 
           items: departmentId === "od_delivery"
             ? [{
                 open_id: "ou_delivery_admin",
-                name: "顾语莺",
+                name: "交付管理员乙",
                 email: "admin@example.com",
                 department_ids: ["od_delivery"]
               }]
@@ -1159,10 +1159,10 @@ test("Feishu administrator search uses tenant contact directory APIs", async () 
   });
   try {
     const lark = new LarkOAuthService();
-    const users = await lark.searchUsers("顾语莺");
+    const users = await lark.searchUsers("交付管理员乙");
     assert.deepEqual(users, [{
       openId: "ou_delivery_admin",
-      name: "顾语莺",
+      name: "交付管理员乙",
       email: "admin@example.com",
       department: "交付中心",
       avatar: undefined
@@ -1201,7 +1201,7 @@ test("Feishu administrator search tolerates redacted department names", async ()
         data: {
           has_more: false,
           items: url.searchParams.get("department_id") === "od_delivery"
-            ? [{ open_id: "ou_delivery_admin", name: "顾语莺", department_ids: ["od_delivery"] }]
+            ? [{ open_id: "ou_delivery_admin", name: "交付管理员乙", department_ids: ["od_delivery"] }]
             : []
         }
       }));
@@ -1224,9 +1224,9 @@ test("Feishu administrator search tolerates redacted department names", async ()
   });
   try {
     const lark = new LarkOAuthService();
-    assert.deepEqual(await lark.searchUsers("顾语莺"), [{
+    assert.deepEqual(await lark.searchUsers("交付管理员乙"), [{
       openId: "ou_delivery_admin",
-      name: "顾语莺",
+      name: "交付管理员乙",
       email: undefined,
       department: undefined,
       avatar: undefined
@@ -1272,7 +1272,7 @@ test("Feishu administrator search reports redacted user base fields", async () =
   });
   try {
     const lark = new LarkOAuthService();
-    await assert.rejects(() => lark.searchUsers("顾语莺"), (error) => {
+    await assert.rejects(() => lark.searchUsers("交付管理员乙"), (error) => {
       assert.equal(error.code, "LARK_CONTACT_USER_FIELDS_REDACTED");
       assert.deepEqual(error.requiredScopes, ["contact:user.base:readonly"]);
       return true;
@@ -1395,8 +1395,8 @@ test("阶段模型可序列化，浏览器据此复算得到同一个百分比",
 
 test("一个需求可以填多位 PM，每位都能看到它", () => {
   const data = dataset([
-    { "项目名称": "多 PM 需求", "PM": "张三、李四", "需求人": "王冠楚" },
-    { "项目名称": "单 PM 需求", "PM": "赵五", "需求人": "王冠楚" }
+    { "项目名称": "多 PM 需求", "PM": "张三、李四", "需求人": "需求方甲" },
+    { "项目名称": "单 PM 需求", "PM": "赵五", "需求人": "需求方甲" }
   ]);
   // Both PMs of the first requirement resolve it, and neither picks up the other requirement.
   assert.deepEqual(requesterRecords(data, "张三").map((record) => record.fields["项目名称"]), ["多 PM 需求"]);
@@ -1421,13 +1421,13 @@ test("人名列表的分隔符在可见性判定和名单里保持一致", () =>
 
 test("提交需求时多位 PM 被规范化成同一种分隔符", () => {
   const fields = demandToLedgerFields(
-    { requesterName: "王冠楚", fields: { "需求描述": "多 PM", "是否设置PM": "是", "PM": "张三;李四、张三" } },
+    { requesterName: "需求方甲", fields: { "需求描述": "多 PM", "是否设置PM": "是", "PM": "张三;李四、张三" } },
     [{ id: "PM", name: "PM" }, { id: "需求人", name: "需求人" }]
   );
   // Deduplicated and re-joined, so the value round-trips through splitNameList unchanged.
   assert.equal(fields["PM"], "张三、李四");
   const notNeeded = demandToLedgerFields(
-    { requesterName: "王冠楚", fields: { "需求描述": "无 PM", "是否设置PM": "否", "PM": "张三" } },
+    { requesterName: "需求方甲", fields: { "需求描述": "无 PM", "是否设置PM": "否", "PM": "张三" } },
     [{ id: "PM", name: "PM" }]
   );
   assert.equal(notNeeded["PM"], "");
@@ -1495,7 +1495,7 @@ test("进度按未收窄的记录计算，不受字段投影影响", () => {
   const full = dataset([{
     "项目名称": "缅甸语视频",
     "获取状态": "验收中",
-    "需求人": "王冠楚",
+    "需求人": "需求方甲",
     // None of these three survive the requester projection, and all three are stage evidence.
     "实际交付完成日期": "2026/07/01",
     "验收通过交付量(GB)": "12",
@@ -1669,7 +1669,7 @@ test("同步只写变化的记录，不会覆盖掉同时提交的需求", async
 
   // 窗口期内需求方提交，落库
   const submitted = { record_id: "import-99", fields: demandToLedgerFields(
-    { requesterName: "王冠楚", fields: { "需求描述": "窗口期提交" } },
+    { requesterName: "需求方甲", fields: { "需求描述": "窗口期提交" } },
     [{ id: "项目名称", name: "项目名称" }, { id: "需求人", name: "需求人" }, { id: "需求负责人", name: "需求负责人" }, { id: "获取状态", name: "获取状态" }]
   ) };
   const live = structuredClone(existing);
@@ -1683,7 +1683,7 @@ test("同步只写变化的记录，不会覆盖掉同时提交的需求", async
   // 关键断言：changed 里只有飞书那条新记录，不包含（也不会抹掉）需求方提交的那条
   assert.equal(merged.changed.length, 1);
   assert.equal(merged.changed[0].fields["任务代码"], "TK0002");
-  assert.equal(merged.changed.some((record) => record.fields["需求人"] === "王冠楚"), false);
+  assert.equal(merged.changed.some((record) => record.fields["需求人"] === "需求方甲"), false);
 
   // 把 changed 应用到「含新需求」的真实库上，两条都在
   const byKey = new Map(live.records.map((record) => [importBusinessKey(record.fields || {}), record]));
@@ -1693,9 +1693,9 @@ test("同步只写变化的记录，不会覆盖掉同时提交的需求", async
     else live.records.push(record);
   }
   assert.equal(live.records.length, 3);
-  assert.equal(requesterRecords(live, "王冠楚").length, 1, "需求方提交的需求必须还在");
+  assert.equal(requesterRecords(live, "需求方甲").length, 1, "需求方提交的需求必须还在");
   // 反过来，整表覆盖写会丢：这正是修复前的行为
-  assert.equal(requesterRecords(merged.dataset, "王冠楚").length, 0);
+  assert.equal(requesterRecords(merged.dataset, "需求方甲").length, 0);
 });
 
 test("合并结果里未变化的记录不会进入 changed", async () => {
