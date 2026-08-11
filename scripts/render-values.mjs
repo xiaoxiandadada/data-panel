@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 生成一份可直接交给部署同学的 prod values.yaml 片段。
+ * 生成一份可直接交给部署同学的 values.yaml 片段（--env=dev 或 --env=prod）。
  *
  * 为什么需要这个脚本，而不是手抄一份 dev 配置：
  *
@@ -16,10 +16,10 @@
  * shell 历史和各种日志。文件权限设为 600，并落在 .gitignore 覆盖的路径下。
  *
  * 用法：
- *   node scripts/render-prod-values.mjs [输出路径]
- *   node scripts/render-prod-values.mjs --oss-key=... --oss-secret=... --oss-bucket=... --oss-endpoint=...
- *   node scripts/render-prod-values.mjs --domain=data-panel.shlab.tech
- *   node scripts/render-prod-values.mjs --mongo=... --redis=...
+ *   node scripts/render-values.mjs [输出路径]
+ *   node scripts/render-values.mjs --oss-key=... --oss-secret=... --oss-bucket=... --oss-endpoint=...
+ *   node scripts/render-values.mjs --domain=data-panel.shlab.tech
+ *   node scripts/render-values.mjs --mongo=... --redis=...
  *
  * 这些值从命令行传入而不是写死在脚本里，是为了让填写者自己在本机完成 —— 凭据不必经过
  * 任何聊天记录或工单系统。传了哪几个就填哪几个，其余仍留占位符。
@@ -34,7 +34,10 @@ const flag = (name) => {
   return hit ? hit.slice(name.length + 3).trim() : "";
 };
 const positional = args.find((item) => !item.startsWith("--"));
-const outPath = resolve(positional || ".tmp/prod-values.yaml");
+// dev 与 prod 的差异集中在这里，避免两份配置各自手抄而漂移。
+const environment = flag("env") === "dev" ? "dev" : "prod";
+const isDev = environment === "dev";
+const outPath = resolve(positional || `.tmp/${environment}-values.yaml`);
 const supplied = {
   ossKey: flag("oss-key"),
   ossSecret: flag("oss-secret"),
@@ -67,8 +70,8 @@ const generated = {
 
 const PLACEHOLDER = "请填写";
 const lines = [
-  "# data-panel 生产环境配置",
-  `# 由 scripts/render-prod-values.mjs 生成。含真实密钥，交付后请删除本文件。`,
+  `# data-panel ${isDev ? "dev（测试）" : "prod（生产）"}环境配置`,
+  `# 由 scripts/render-values.mjs 生成。含真实密钥，交付后请删除本文件。`,
   "#",
   "# 空值分两类，交接时不要混淆：",
   `#   1) 标「${PLACEHOLDER}」的 —— 真的缺，必须补上。`,
@@ -79,20 +82,26 @@ const lines = [
   "HOST: \"0.0.0.0\"",
   "PORT: \"5173\"",
   "",
-  "# 本环境独立生成，未复用 dev 的值",
-  `AUTH_SECRET: "${generated.AUTH_SECRET}"`,
+  isDev
+    ? "# dev 已在运行：保留 values.yaml 里现有的值，不要换新的"
+    : "# 本环境独立生成，未复用 dev 的值",
+  isDev
+    ? `AUTH_SECRET: "${PLACEHOLDER}：保留 dev 现有值。换新值会让所有现存登录会话立即失效"`
+    : `AUTH_SECRET: "${generated.AUTH_SECRET}"`,
   "AUTH_MOCK_ENABLED: \"false\"",
   "ADMIN_PASSWORD: \"\"  # 刻意留空：AUTH_MOCK_ENABLED=false 时该口令不生效，填了只是多一份能泄露的密钥",
   "",
   supplied.mongo
     ? `MONGODB_URI: "${supplied.mongo}"`
-    : `MONGODB_URI: "${PLACEHOLDER}：可沿用 dev values.yaml 里的同一条连接串，但下面的 MONGODB_DB 必须换名"`,
+    : `MONGODB_URI: "${PLACEHOLDER}：${isDev ? "保留 dev 现有连接串" : "可沿用 dev 的同一条连接串，但下面的 MONGODB_DB 必须换名"}"`,
   // 共用实例是安全的，因为库名可独立指定：ledger-store 用 client.db(MONGODB_DB)。
   // 但库名若不换，prod 会直接写进 dev 的台账 —— 这是唯一不能照抄的地方。
-  "MONGODB_DB: \"delivery_pipeline_prod\"  # 沿用 dev 的 MONGODB_URI 时，必须靠这个库名与 dev 隔离",
+  isDev
+    ? "MONGODB_DB: \"delivery_pipeline\"  # dev 沿用原库名，保留现有数据"
+    : "MONGODB_DB: \"delivery_pipeline_prod\"  # 与 dev 共用实例时，必须靠这个库名隔离；独立实例也建议保留后缀以防误连",
   supplied.redis
     ? `REDIS_URL: "${supplied.redis}"`
-    : `REDIS_URL: "${PLACEHOLDER}：可沿用 dev 的地址，但结尾必须加库号，例如 redis://主机:6379/1（dev 用默认 0）"`,
+    : `REDIS_URL: "${PLACEHOLDER}：${isDev ? "保留 dev 现有地址（默认库 0）" : "可沿用 dev 的地址，但结尾必须加库号，例如 redis://主机:6379/1"}"`,
   // 队列键名在 queue.service.ts 里是硬编码的（delivery-pipeline:events 等），
   // 所以同一个 Redis 库会让 dev 与 prod 互相抢事件 —— brpoplpush 先弹到的一方赢，
   // 事件会被对方消费掉，甚至发出本不该发的飞书通知。
@@ -105,10 +114,10 @@ const lines = [
   "LARK_API_HOST: \"https://open.feishu.cn\"",
   supplied.domain
     ? `LARK_REDIRECT_URI: "https://${supplied.domain}/api/auth/lark/callback"`
-    : `LARK_REDIRECT_URI: "https://${PLACEHOLDER}prod域名/api/auth/lark/callback"`,
+    : `LARK_REDIRECT_URI: "https://${isDev ? "data-panel-dev.shlab.tech" : `${PLACEHOLDER}prod域名`}/api/auth/lark/callback"`,
   supplied.domain
     ? `PUBLIC_APP_URL: "https://${supplied.domain}"`
-    : `PUBLIC_APP_URL: "https://${PLACEHOLDER}prod域名"`,
+    : `PUBLIC_APP_URL: "https://${isDev ? "data-panel-dev.shlab.tech" : `${PLACEHOLDER}prod域名`}"`,
   "",
   "# 飞书 Base 五张源表，与 dev 完全相同",
   `LARK_WIKI_NODE_TOKEN: "${env.LARK_WIKI_NODE_TOKEN || "ZqC3whTTXiU2rUkLdRycTtmhnYE"}"`,
@@ -127,8 +136,12 @@ const lines = [
   "",
   "LARK_SYNC_INTERVAL_MS: \"300000\"",
   "LARK_SYNC_CONCURRENCY: \"3\"",
-  "# 本环境独立生成，未复用 dev 的值",
-  `LARK_BASE_WEBHOOK_SECRET: "${generated.LARK_BASE_WEBHOOK_SECRET}"`,
+  isDev
+    ? "# dev 已在运行：保留 values.yaml 里现有的值"
+    : "# 本环境独立生成，未复用 dev 的值",
+  isDev
+    ? `LARK_BASE_WEBHOOK_SECRET: "${PLACEHOLDER}：保留 dev 现有值。换新值会让已建的飞书 Workflow 校验失败"`
+    : `LARK_BASE_WEBHOOK_SECRET: "${generated.LARK_BASE_WEBHOOK_SECRET}"`,
   "",
   "LARK_WEBHOOK_URL: \"\"  # 刻意留空：可选的群机器人。个人状态通知走应用机器人，填了会额外往群里再发一条",
   "LARK_REQUEST_FORM_URL: \"https://aicarrier.feishu.cn/share/base/form/shrcnVsyjmzWzY4bKZAqmPPL4Yc\"",
@@ -155,7 +168,7 @@ const lines = [
   supplied.ossEndpoint
     ? `OSS_ENDPOINT: "${supplied.ossEndpoint}"`
     : `OSS_ENDPOINT: "${PLACEHOLDER}：桶所在地域，如 oss-cn-shanghai.aliyuncs.com，不带协议不带桶名"`,
-  "OSS_PREFIX: \"data-panel/prod-snapshots\"",
+  `OSS_PREFIX: "data-panel/${environment}-snapshots"`,
   "LEDGER_ALLOW_BULK_DELETE: \"\"  # 刻意留空：空 = 大批量删除保护开启。置 true 会放行「一次删掉过半台账」，仅在刻意导入小数据集时临时开",
   ""
 ];
@@ -168,11 +181,15 @@ chmodSync(outPath, 0o600);
 const text = lines.join("\n");
 console.log(`已生成：${outPath}（权限 600）`);
 console.log(`  配置项 ${text.split("\n").filter((l) => /^[A-Z]/.test(l)).length} 个`);
-console.log(`  现场生成的独立密钥 2 个：AUTH_SECRET、LARK_BASE_WEBHOOK_SECRET`);
+console.log(isDev
+  ? "  AUTH_SECRET / LARK_BASE_WEBHOOK_SECRET 留为占位符：dev 已在运行，必须保留现有值"
+  : "  现场生成的独立密钥 2 个：AUTH_SECRET、LARK_BASE_WEBHOOK_SECRET");
 console.log(`  从本地 .env 复用 ${reusable.length - missing.length}/${reusable.length} 个：${reusable.filter((k) => env[k]).join("、") || "无"}`);
 if (missing.length) console.log(`  ⚠ 本地 .env 缺少：${missing.join("、")} —— 需从 dev 的 values.yaml 取`);
 const fromArgs = Object.entries(supplied).filter(([, v]) => v).map(([k]) => k);
 if (fromArgs.length) console.log(`  命令行传入 ${fromArgs.length} 项：${fromArgs.join("、")}`);
 console.log(`  待填占位符 ${(text.match(new RegExp(PLACEHOLDER, "g")) || []).length} 处`);
 console.log("");
-console.log("接下来：打开该文件，填掉标有「请填写」的几处，交给部署同学。交付后删除本文件。");
+console.log(isDev
+  ? "接下来：这是 dev 的目标状态，用它与现有 values.yaml 逐项比对，只补差异项，不要整份覆盖。"
+  : "接下来：打开该文件，填掉标有「请填写」的几处，交给部署同学。交付后删除本文件。");
