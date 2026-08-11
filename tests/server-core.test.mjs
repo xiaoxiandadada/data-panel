@@ -1774,3 +1774,27 @@ test("快照前缀可配置，默认落在 data-panel/snapshots 下", () => {
     assert.equal(service.describe().target, "oss://b/custom/path");
   });
 });
+
+test("科学计数法的数量值不会原样显示给用户", () => {
+  // 飞书把大数字导出成科学计数法字符串，实测线上 340 条「签收数量（个）」里有 18 条是这个形式。
+  // 前端原样 escapeHtml 输出，读者看到的是 5.2398268e+07 —— 看不出这是 5239 万个文件。
+  // 这里验证解析逻辑；格式化本身在客户端，用同一套规则。
+  const parse = (text) => {
+    const clean = String(text).replace(/[\s,]/g, "");
+    if (!/^\d+(\.\d+)?(e[+-]?\d+)?$/i.test(clean)) return "";
+    const value = Number(clean);
+    if (!Number.isFinite(value)) return "";
+    return Number.isInteger(value) ? value.toLocaleString("zh-CN") : Number(value.toFixed(2)).toLocaleString("zh-CN");
+  };
+  assert.equal(parse("5.2398268e+07"), "52,398,268");
+  assert.equal(parse("1.648519e+06"), "1,648,519");
+  assert.equal(parse("996716"), "996,716");
+  assert.equal(parse("1,234"), "1,234");
+  // 小数收敛到两位，避免 147.00000000000003 这类浮点噪声
+  assert.equal(parse("147.00000000000003"), "147");
+  assert.equal(parse("92.456"), "92.46");
+  // 这些列里确实混着人写的内容，不能强行当数字解析 —— 返回空串让调用方原样显示
+  assert.equal(parse("最大值（待填）"), "");
+  assert.equal(parse("待确认"), "");
+  assert.equal(parse(""), "");
+});

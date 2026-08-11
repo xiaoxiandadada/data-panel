@@ -108,6 +108,15 @@ const PERSON_FIELDS = new Set(["需求负责人", "需求人", "关注人", "PM"
 // overwriting the previous name.
 const MULTI_PERSON_FIELDS = new Set(["需求人", "关注人", "PM"]);
 const LINK_FIELDS = new Set(["需求文档", "入库地址", "数据平台地址", "交付路径"]);
+/**
+ * 数量与体积列。飞书把大数字导出成科学计数法字符串（实测 18/340 条如此），
+ * 原样显示就是 `5.2398268e+07` —— 读者根本看不出这是 5239 万个文件。
+ * 这些列统一格式化成千分位。
+ */
+const QUANTITY_FIELDS = new Set([
+  "签收数量（个）", "验收通过数据量（个）", "签收交付量（GB）", "验收通过交付量(GB)",
+  "预计任务量", "预算金额", "结算金额"
+]);
 const STATUS_COLORS = {
   done: "#2f855a",
   active: "#2563eb",
@@ -286,6 +295,21 @@ function escapeAttr(value) {
   return escapeHtml(value).replace(/`/g, "&#096;");
 }
 
+/**
+ * 把数量类取值格式化成人能读的形式，认不出来就返回空字符串让调用方原样显示 ——
+ * 这些列里确实混着「最大值（待填）」这类人写的内容，不能强行当数字解析。
+ */
+function formatQuantity(text) {
+  const clean = text.replace(/[\s,]/g, "");
+  if (!/^\d+(\.\d+)?(e[+-]?\d+)?$/i.test(clean)) return "";
+  const value = Number(clean);
+  if (!Number.isFinite(value)) return "";
+  // 整数用千分位；小数保留最多两位，避免 147.00000000000003 这种浮点噪声
+  return Number.isInteger(value)
+    ? value.toLocaleString("zh-CN")
+    : Number(value.toFixed(2)).toLocaleString("zh-CN");
+}
+
 function isUrl(value) {
   return /^https?:\/\/\S+$/i.test(String(value || "").trim());
 }
@@ -293,6 +317,10 @@ function isUrl(value) {
 function renderFieldValue(field, value) {
   const text = stringifyCell(value);
   if (!text) return "-";
+  if (QUANTITY_FIELDS.has(field)) {
+    const formatted = formatQuantity(text);
+    if (formatted) return escapeHtml(formatted);
+  }
   if (LINK_FIELDS.has(field) && isUrl(text)) {
     const label = field === "需求文档" ? "打开飞书文档" : "打开链接";
     return `<a class="field-link" href="${escapeAttr(text)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`;
